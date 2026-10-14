@@ -1,0 +1,15 @@
+# Fork image: only the iptv-tunerr binary, for `iptv-tunerr plex-label-proxy`. Static, on distroless.
+# It runs as root inside the container, which rootless podman maps to the host account, so a Unix socket the proxy
+# creates (-listen unix:/path) belongs to that account. See FORK.md.
+FROM --platform=$BUILDPLATFORM golang:1.26.9-alpine AS build
+ARG TARGETOS TARGETARCH VERSION=dev
+WORKDIR /src
+COPY . .
+RUN CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" GOTOOLCHAIN=local \
+      go build -mod=vendor -trimpath -ldflags="-s -w -X main.Version=${VERSION}" \
+      -o /iptv-tunerr ./cmd/iptv-tunerr
+
+FROM gcr.io/distroless/static-debian12
+COPY --from=build /iptv-tunerr /usr/local/bin/iptv-tunerr
+ENTRYPOINT ["/usr/local/bin/iptv-tunerr"]
+CMD ["plex-label-proxy", "-h"]

@@ -18,13 +18,17 @@ it never leaves the proxy.
   `docker run --rm -v "$PWD":/src -w /src -e GOFLAGS=-mod=vendor -e GOTOOLCHAIN=local golang:1.26 go test ./internal/plexlabelproxy/`
 - **Tags** start with `oliviacpu-`, never `v`: upstream's `release.yml` publishes on `v*` tags.
 
-## GitHub Actions
+## Image and GitHub Actions
 
-- **Off on this fork** (repository setting) until it has its own image workflow.
-- **Upstream's workflows aren't used here.** Most of them publish to package registries (Chocolatey, Snap, Winget, AUR,
-  COPR, PPA, Docker Hub) with secrets this fork doesn't have.
-- **When the fork's image workflow is added:** turn Actions back on, then disable every other workflow
-  (`gh workflow disable <name> --repo oliviacpu/iptvtunerr`).
+- **Image:** `ghcr.io/oliviacpu/iptvtunerr:<tag>` from `Dockerfile.fork-proxy`. It's the `iptv-tunerr` binary only,
+  static, on distroless, for `plex-label-proxy`. It runs as root in the container, which rootless podman maps to the
+  host account, so a socket the proxy creates belongs to that account.
+- **Build:** `.github/workflows/fork-image.yml` runs on `oliviacpu-*` tags (or by hand on one). It runs the
+  `plex-label-proxy` tests, then builds and pushes the image.
+- **Upstream's workflows are disabled here** (`gh workflow disable <name> --repo oliviacpu/iptvtunerr`). Most of them
+  publish to package registries (Chocolatey, Snap, Winget, AUR, COPR, PPA, Docker Hub) with secrets this fork doesn't
+  have, and the rest would run CI and CodeQL on every push for nothing. After pulling upstream changes, check
+  `gh workflow list --repo oliviacpu/iptvtunerr --all` for new upstream workflows and disable them too.
 
 ## Cloning on macOS
 

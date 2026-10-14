@@ -1,0 +1,53 @@
+name: Fork image
+
+# This fork's only workflow (every upstream workflow is disabled here; see FORK.md). On an oliviacpu-* tag it runs
+# the plex-label-proxy tests, then builds Dockerfile.fork-proxy and pushes ghcr.io/oliviacpu/iptvtunerr:<tag>.
+
+on:
+  push:
+    tags:
+      - "oliviacpu-*"
+  workflow_dispatch: # run it by hand on an oliviacpu-* tag (pick the tag as the ref)
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: fork-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: github.repository == 'oliviacpu/iptvtunerr' && startsWith(github.ref, 'refs/tags/oliviacpu-')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Proxy tests
+        run: |
+          docker run --rm -v "$PWD":/src -w /src -e GOFLAGS=-mod=vendor -e GOTOOLCHAIN=local golang:1.26.9 \
+            go test ./internal/plexlabelproxy/ ./cmd/iptv-tunerr/
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.fork-proxy
+          push: true
+          platforms: linux/amd64
+          build-args: |
+            VERSION=${{ github.ref_name }}
+          tags: ghcr.io/${{ github.repository_owner }}/iptvtunerr:${{ github.ref_name }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.licenses=AGPL-3.0-or-later
