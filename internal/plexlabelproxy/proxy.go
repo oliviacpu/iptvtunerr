@@ -78,6 +78,18 @@ type Config struct {
 	// history. Works for all content types (library movies/shows and Live TV).
 	NeutralizeOwnerHistory bool
 
+	// NoElevateSubscriptions, when true, never borrows OwnerToken for DVR
+	// subscription requests (/media/subscriptions...), even with Live TV
+	// evidence: shared users can watch Live TV, but can't see, create, edit or
+	// delete recordings as the owner. Applies with ElevateLiveTV.
+	NoElevateSubscriptions bool
+
+	// NoElevateRootIdentity, when true, never borrows OwnerToken for / and
+	// /identity, even when the Referer looks like a Live TV page. The owner's
+	// view of those endpoints includes account details. Applies with
+	// ElevateLiveTV.
+	NoElevateRootIdentity bool
+
 	// Labels supplies the LiveTV identifier -> tab label map. Refreshed lazily.
 	Labels LabelSource
 
@@ -586,6 +598,9 @@ func (p *Proxy) elevateLiveTVRequest(req *http.Request, originalToken string) {
 	} else if !IsLiveTVRequest(req) {
 		return
 	}
+	if !p.liveTVElevationAllowed(req) {
+		return
+	}
 	elevationToken := originalToken
 	if strings.TrimSpace(elevationToken) == "" {
 		if token, matched := p.sessionTokenForRequest(req); token != "" {
@@ -630,6 +645,20 @@ func (p *Proxy) elevateLiveTVRequest(req *http.Request, originalToken string) {
 		elevationToken != strings.TrimSpace(p.cfg.OwnerToken) {
 		p.trackSession(req, elevationToken)
 	}
+}
+
+// liveTVElevationAllowed applies the operator's opt-outs to a request already
+// classified as Live TV.
+func (p *Proxy) liveTVElevationAllowed(req *http.Request) bool {
+	if p.cfg.NoElevateSubscriptions && isMediaSubscriptionPath(req.URL.EscapedPath()) {
+		p.auditElevation(req, "deny_subscription", "", "subscription elevation disabled by NoElevateSubscriptions")
+		return false
+	}
+	if path := req.URL.EscapedPath(); p.cfg.NoElevateRootIdentity && (path == "/" || path == "/identity") {
+		p.auditElevation(req, "deny_root_identity", "", "root/identity elevation disabled by NoElevateRootIdentity")
+		return false
+	}
+	return true
 }
 
 // trackSession stores request correlation keys → original user token mappings

@@ -141,6 +141,12 @@ known Live TV surfaces:
 - play queue helper requests under `/playQueues` whose `uri` or `path` query
   parameter is a Live TV session/provider path; `POST /playQueues` is allowed
   only for this Live TV stream-start case
+
+A parameter is a Live TV path only if, once decoded, it is an XMLTV guid or
+provider key, or its cleaned path (query string and fragment ignored) is under
+`/livetv/` or an XMLTV EPG provider, directly or as the path of a `server://`
+URI. `/library/metadata/1?x=/livetv/` and `/livetv/../library/metadata/1` are
+not. Form and JSON bodies are checked field by field, never as free text.
 - root identity requests (`/` or `/identity`) only when the `Referer` is already
   a Live TV page
 
@@ -148,7 +154,8 @@ Everything else keeps the inbound client token. In particular:
 
 - unauthenticated requests are not elevated
 - Plex tokens that cannot already access this server are not elevated
-- arbitrary query parameters that merely mention `/livetv/` do not trigger elevation
+- arbitrary query parameters, query strings, fragments and body fields that
+  merely mention `/livetv/` do not trigger elevation
 - `OPTIONS` preflight requests are not elevated
 - mutating methods such as `POST`, `PUT`, `PATCH`, and `DELETE` are not
   elevated on Live TV paths, except stream-start requests when their `uri` or
@@ -330,6 +337,14 @@ iptv-tunerr plex-label-proxy \
   -neutralize-owner-history \
   -refresh-seconds 30
 ```
+
+Two flags narrow elevation further:
+
+- `-no-elevate-subscriptions`: DVR subscription requests (`/media/subscriptions*`)
+  always keep the user's token, so shared users watch Live TV but can't see,
+  create, edit or delete recordings as the owner.
+- `-no-elevate-root-identity`: `/` and `/identity` always keep the user's
+  token. The owner's view of them includes account details.
 
 `-owner-token` defaults to `IPTV_TUNERR_PMS_OWNER_TOKEN`,
 `PLEX_OWNER_TOKEN`, and then `-token` / `IPTV_TUNERR_PMS_TOKEN` /

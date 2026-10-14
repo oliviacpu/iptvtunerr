@@ -55,6 +55,22 @@ Newest first.
 - **Upstream:** not sent / issue or PR link.
 -->
 
+### Flags to keep recordings and the server summary out of elevation (2026-10-14)
+
+- **What it fixes:** with `-elevate-live-tv`, shared users got the owner token for DVR subscription requests (seeing,
+  creating, editing and deleting recordings as the owner). They also got it for `/` and `/identity` whenever their
+  `Referer` named a Live TV page. The owner's view of those includes account details, and the `Referer` is
+  client-supplied.
+- **Cause:** both are part of upstream's Live TV classification, with no way to turn them off.
+- **Fix:** two opt-in flags. Upstream's default is unchanged.
+  - `-no-elevate-subscriptions` (`Config.NoElevateSubscriptions`)
+  - `-no-elevate-root-identity` (`Config.NoElevateRootIdentity`)
+
+  `Proxy.liveTVElevationAllowed` applies them after classification, with `deny_subscription` and `deny_root_identity`
+  audit lines. Documented in the runbook's Request Classification and Run sections.
+- **Test:** `opt_out_test.go`, each flag on and off against the same requests.
+- **Upstream:** not sent.
+
 ### Live TV elevation only for real Live TV targets (2026-10-14)
 
 - **What it fixes:** a shared user could borrow the owner token for library content. A transcode, play queue or
