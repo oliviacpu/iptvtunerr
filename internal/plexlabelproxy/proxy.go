@@ -345,6 +345,13 @@ func New(cfg Config) (*Proxy, error) {
 		if p.cfg.NeutralizeOwnerHistory {
 			p.neutralizeOwnerScrobble(req)
 		}
+		// Whatever borrowed the owner token for this request, the response
+		// must not hand it to the client: remember the client's own token so
+		// modifyResponse can put it back in place of the owner's.
+		if owner := strings.TrimSpace(p.cfg.OwnerToken); owner != "" &&
+			inboundPlexToken(req) == owner && strings.TrimSpace(originalToken) != owner {
+			*req = *req.WithContext(context.WithValue(req.Context(), clientTokenContextKey{}, strings.TrimSpace(originalToken)))
+		}
 	}
 	p.reverseProxy = rp
 	return p, nil
@@ -505,6 +512,9 @@ func shouldLogProxyAccess(req *http.Request) bool {
 // rewrite when applicable, and substitute the response body before it reaches
 // the client.
 func (p *Proxy) modifyResponse(resp *http.Response) error {
+	if err := p.scrubOwnerToken(resp); err != nil {
+		return err
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil
 	}
@@ -645,6 +655,90 @@ func (p *Proxy) elevateLiveTVRequest(req *http.Request, originalToken string) {
 		elevationToken != strings.TrimSpace(p.cfg.OwnerToken) {
 		p.trackSession(req, elevationToken)
 	}
+}
+
+// clientTokenContextKey marks a proxied request that carried the owner token
+// for a client; its value is the client's own token ("" if it sent none).
+type clientTokenContextKey struct{}
+
+// maxScrubBodyBytes bounds how much of a text response is read to remove the
+// owner token. A larger text response to an elevated request is refused rather
+// than passed through unchecked.
+const maxScrubBodyBytes = 64 << 20
+
+// scrubOwnerToken replaces the owner token with the client's own token
+// anywhere Plex echoed it in the response to an elevated request: headers
+// (Location, Link, ...) and text bodies (XML, JSON, playlists). Media bodies
+// aren't read. Plex usually doesn't echo the token, but a URL it builds from
+// the request (a redirect, a playlist, a "key" attribute) would carry the
+// owner's credential to the client otherwise.
+func (p *Proxy) scrubOwnerToken(resp *http.Response) error {
+	owner := strings.TrimSpace(p.cfg.OwnerToken)
+	if owner == "" || resp == nil || resp.Request == nil {
+		return nil
+	}
+	clientToken, elevated := resp.Request.Context().Value(clientTokenContextKey{}).(string)
+	if !elevated {
+		return nil
+	}
+	headersScrubbed := false
+	for name, values := range resp.Header {
+		for i, v := range values {
+			if strings.Contains(v, owner) {
+				values[i] = strings.ReplaceAll(v, owner, clientToken)
+				headersScrubbed = true
+			}
+		}
+		resp.Header[name] = values
+	}
+	if headersScrubbed {
+		p.logger.Printf("plexlabelproxy_scrub: owner token removed from response headers path=%s", resp.Request.URL.EscapedPath())
+	}
+	// Upgraded connections and event streams never end; untyped bodies of
+	// unknown length may be media. None of them are read.
+	contentType := resp.Header.Get("Content-Type")
+	if resp.Body == nil || resp.StatusCode == http.StatusSwitchingProtocols ||
+		!textContentType(contentType) || (strings.TrimSpace(contentType) == "" && resp.ContentLength < 0) {
+		return nil
+	}
+	if resp.ContentLength > maxScrubBodyBytes {
+		return fmt.Errorf("elevated %s response of %d bytes is too large to check for the owner token", resp.Request.URL.EscapedPath(), resp.ContentLength)
+	}
+	resp.Body = struct {
+		io.Reader
+		io.Closer
+	}{io.LimitReader(resp.Body, maxScrubBodyBytes+1), resp.Body}
+	body, encoding, err := readBody(resp)
+	if err != nil {
+		return err
+	}
+	if len(body) > maxScrubBodyBytes {
+		return fmt.Errorf("elevated %s response is too large to check for the owner token", resp.Request.URL.EscapedPath())
+	}
+	if bytes.Contains(body, []byte(owner)) {
+		body = bytes.ReplaceAll(body, []byte(owner), []byte(clientToken))
+		p.logger.Printf("plexlabelproxy_scrub: owner token removed from response body path=%s", resp.Request.URL.EscapedPath())
+	}
+	return restoreBody(resp, body, encoding)
+}
+
+// textContentType reports whether a response body is text the owner token
+// could appear in: XML, JSON, HTML, plain text and HLS playlists. Media and
+// other binary bodies are not.
+func textContentType(contentType string) bool {
+	ct := strings.ToLower(strings.TrimSpace(contentType))
+	if ct == "" {
+		return true
+	}
+	if strings.Contains(ct, "event-stream") {
+		return false
+	}
+	for _, kind := range []string{"xml", "json", "text/", "mpegurl", "javascript"} {
+		if strings.Contains(ct, kind) {
+			return true
+		}
+	}
+	return false
 }
 
 // liveTVElevationAllowed applies the operator's opt-outs to a request already

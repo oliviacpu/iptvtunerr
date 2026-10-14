@@ -55,6 +55,24 @@ Newest first.
 - **Upstream:** not sent / issue or PR link.
 -->
 
+### The owner token never leaves in a response (2026-10-14)
+
+- **What it fixes:** responses to elevated requests went back to the client unchanged. If Plex echoed the token a
+  request arrived with (a redirect `Location`, an HLS playlist, a `key` URL in XML or JSON), the shared user received
+  the owner's token. The runbook said the token is not returned to the client, but nothing enforced it.
+- **Cause:** `modifyResponse` only rewrote labels and `allowTuners` hints.
+- **Fix:**
+  - **Marking:** the director marks every request that reaches Plex with the owner token on someone else's behalf. It
+    stores the client's own token in the request context. This covers any elevation path, including `-elevate-all`.
+  - **Scrubbing:** `scrubOwnerToken`, the first step of `modifyResponse`, replaces the owner token with the client's in
+    response headers and text bodies (XML, JSON, HTML, text, HLS playlists; gzip included).
+  - **What isn't read:** media bodies, WebSocket upgrades, event streams, and untyped bodies of unknown length.
+  - **Size limit:** an elevated text response over 64 MiB is refused rather than passed on unchecked.
+- **Test:** `scrub_test.go`. A fake Plex echoes the token into a redirect, XML, a playlist and a gzip body; the client
+  sees only its own token. Library responses and the owner's own responses are untouched. Before the fix, all four
+  echoed the owner token to the client.
+- **Upstream:** not sent.
+
 ### Flags to keep recordings and the server summary out of elevation (2026-10-14)
 
 - **What it fixes:** with `-elevate-live-tv`, shared users got the owner token for DVR subscription requests (seeing,

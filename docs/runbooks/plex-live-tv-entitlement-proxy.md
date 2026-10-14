@@ -113,7 +113,10 @@ PMS using `/library/sections`. This means:
 - a request with no `X-Plex-Token` is not elevated
 - a random Plex account token that cannot access this server is not elevated
 - an already-shared user token can borrow owner tuner entitlement for Live TV
-- the raw owner token is not returned to the client
+- the raw owner token is not returned to the client: if Plex echoes it in the
+  response to an elevated request (a redirect, a playlist, a URL in XML or JSON),
+  the proxy replaces it with the client's own token. Media bodies aren't read;
+  a text response over 64 MiB is refused rather than passed on unchecked
 
 `-elevate-all` still exists as a blunt compatibility mode, but it is not the
 recommended mode. Even there, owner-token injection is gated by the same
