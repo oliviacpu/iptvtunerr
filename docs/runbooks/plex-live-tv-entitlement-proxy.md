@@ -153,6 +153,11 @@ not. Form and JSON bodies are checked field by field, never as free text.
 - root identity requests (`/` or `/identity`) only when the `Referer` is already
   a Live TV page
 
+Classification uses the request path exactly as written, so only canonical
+paths are elevated: no `.` or `..` segments, no empty segments, and no escaped
+dots, slashes or backslashes (`/livetv/../:/prefs` and
+`/livetv/%2e%2e/library/sections` keep the client token).
+
 Everything else keeps the inbound client token. In particular:
 
 - unauthenticated requests are not elevated

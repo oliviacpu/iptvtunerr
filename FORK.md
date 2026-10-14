@@ -55,6 +55,22 @@ Newest first.
 - **Upstream:** not sent / issue or PR link.
 -->
 
+### Only canonical request paths are elevated (2026-10-14)
+
+- **What it fixes:** a shared user could reach any owner-only Plex endpoint through a request path that starts like
+  Live TV but resolves elsewhere: `/livetv/../:/prefs`, `/livetv/%2e%2e/library/sections`, `/livetv/..%2flibrary/…`,
+  `/media/grabbers/../../library/sections/1/refresh`, `/media/subscriptions/../../:/prefs`. All were classified as
+  Live TV and sent with the owner token. Some Plex `GET` endpoints change state (library refresh, scrobble).
+- **Cause:** `IsLiveTVRequest` and friends matched prefixes of the raw escaped path, and neither Go's server nor the
+  reverse proxy resolves dot segments, so Plex receives the path as written.
+- **Fix:** `canonicalRequestPath` in `entitlement.go`: only absolute paths with no `.`, `..` or empty segments (one
+  trailing slash allowed) and no `%2e`, `%2f`, `%5c` or `\` can be classified as Live TV. Applied in
+  `IsLiveTVRequest`, `IsLiveTVDiscoveryRequest`, `IsLiveTVStreamRequest` and `isLiveTVSubscriptionRequest`. Anything
+  else goes to Plex with the client's own token.
+- **Test:** `canonical_path_test.go`. Before the fix, all ten paths were elevated and the round trip reached Plex with
+  the owner token.
+- **Upstream:** not sent.
+
 ### The owner token never leaves in a response (2026-10-14)
 
 - **What it fixes:** responses to elevated requests went back to the client unchanged. If Plex echoed the token a

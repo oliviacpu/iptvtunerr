@@ -52,7 +52,7 @@ func ApplyLiveTVDiscoveryElevation(req *http.Request, ownerToken string) bool {
 // own token rather than the owner's. Use with ApplyLiveTVDiscoveryElevation
 // to test whether Plex enforces entitlement at stream time or only at setup.
 func IsLiveTVDiscoveryRequest(req *http.Request) bool {
-	if req == nil || req.URL == nil {
+	if req == nil || req.URL == nil || !canonicalRequestPath(req.URL.EscapedPath()) {
 		return false
 	}
 	if !liveTVElevationMethod(req.Method) {
@@ -82,7 +82,7 @@ func IsLiveTVDiscoveryRequest(req *http.Request) bool {
 // session for Live TV content. These are the paths that cause Plex to attribute
 // a session — and therefore watch history — to whichever token is used.
 func IsLiveTVStreamRequest(req *http.Request) bool {
-	if req == nil || req.URL == nil {
+	if req == nil || req.URL == nil || !canonicalRequestPath(req.URL.EscapedPath()) {
 		return false
 	}
 	path := req.URL.EscapedPath()
@@ -108,7 +108,7 @@ func IsLiveTVStreamRequest(req *http.Request) bool {
 // misses stream-start and session-setup calls that Plex validates against the
 // tuner entitlement.
 func IsLiveTVRequest(req *http.Request) bool {
-	if req == nil || req.URL == nil {
+	if req == nil || req.URL == nil || !canonicalRequestPath(req.URL.EscapedPath()) {
 		return false
 	}
 	if !liveTVElevationMethod(req.Method) {
@@ -145,7 +145,7 @@ func IsLiveTVRequest(req *http.Request) bool {
 }
 
 func isLiveTVSubscriptionRequest(req *http.Request) bool {
-	if req == nil || req.URL == nil {
+	if req == nil || req.URL == nil || !canonicalRequestPath(req.URL.EscapedPath()) {
 		return false
 	}
 	path := req.URL.EscapedPath()
@@ -364,6 +364,34 @@ func bodyBytesContainLiveTVPath(req *http.Request, body []byte, name string) boo
 		}
 	}
 	return jsonBodyHasLiveTVTarget(body, func(key string) bool { return strings.EqualFold(key, name) })
+}
+
+// canonicalRequestPath reports whether an escaped request path is in the form
+// Plex serves it as-is: absolute, with no "." or ".." segments, no empty
+// segments, and no escaped dots, slashes or backslashes. Elevation is decided
+// on the path as written, so a path Plex would resolve to something else
+// (/livetv/../:/prefs, /livetv/%2e%2e/library/sections) must never be elevated.
+func canonicalRequestPath(escaped string) bool {
+	if escaped == "" || escaped[0] != '/' {
+		return false
+	}
+	lower := strings.ToLower(escaped)
+	for _, bad := range []string{"%2e", "%2f", "%5c", "\\"} {
+		if strings.Contains(lower, bad) {
+			return false
+		}
+	}
+	// One trailing slash is allowed (/livetv/dvrs/)
+	trimmed := strings.TrimSuffix(escaped[1:], "/")
+	if trimmed == "" {
+		return true
+	}
+	for _, segment := range strings.Split(trimmed, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 // liveTVTarget reports whether a request parameter value names a Live TV
