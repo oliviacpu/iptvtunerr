@@ -346,7 +346,21 @@ iptv-tunerr plex-label-proxy \
   -refresh-seconds 30
 ```
 
-Two flags narrow elevation further:
+On a host where other users share `127.0.0.1` (shared seedboxes, some
+container setups), listen on a Unix socket instead of a TCP port, so only the
+front end you point at it can connect:
+
+```bash
+iptv-tunerr plex-label-proxy -listen unix:/run/iptvtunerr/proxy.sock -socket-mode 0600 ...
+```
+
+The socket is created with `-socket-mode` (default `0600`), a stale socket at
+that path is replaced (any other file is refused), and it's removed on
+shutdown. Keep it in a directory only the operator and the front end can
+enter. Socket peers are treated like loopback peers: their `X-Forwarded-For`
+and `CF-Connecting-IP` headers are trusted.
+
+These flags narrow elevation further:
 
 - `-no-elevate-subscriptions`: DVR subscription requests (`/media/subscriptions*`)
   always keep the user's token, so shared users watch Live TV but can't see,

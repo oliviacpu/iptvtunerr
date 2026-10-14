@@ -55,6 +55,25 @@ Newest first.
 - **Upstream:** not sent / issue or PR link.
 -->
 
+### Listen on a private Unix socket (2026-10-14)
+
+- **What it fixes:** the proxy could only listen on TCP, and it trusts `X-Forwarded-For` from any loopback peer. On a
+  host where other accounts share `127.0.0.1`, any of them could connect, set their own forwarded address (sources
+  for abuse blocking and session binding), and use the proxy as if they were the front end.
+- **Cause:** `ListenAndServe` always called `net.Listen("tcp", …)`.
+- **Fix:**
+  - **Socket:** `-listen unix:/path` creates a Unix socket with `-socket-mode` (default `0600`,
+    `Config.SocketMode`). A stale socket at the path is replaced; any other file is refused. The socket is removed on
+    shutdown.
+  - **Trust:** requests on it are marked through `http.Server.ConnContext`, and `trustedHeader` trusts their forwarding
+    headers like a loopback peer's (`fromPrivateSocket`).
+  - **Docs:** the runbook's Run section.
+- **Test:** `socket_test.go`:
+  - serving over the socket, with mode 600, a stale socket replaced, and the socket gone after shutdown;
+  - a regular file at the path is refused and left untouched;
+  - forwarded addresses are trusted only from socket or loopback peers.
+- **Upstream:** not sent.
+
 ### A switch to turn off token-less session recovery (2026-10-14)
 
 - **What it fixes:** with `-neutralize-owner-history` or `-elevate-all`, a Live TV request carrying no token borrows

@@ -100,6 +100,13 @@ type Config struct {
 	// NeutralizeOwnerHistory or ElevateAll.
 	NoSessionTokenRecovery bool
 
+	// SocketMode is the permission mode of the Unix socket ListenAndServe
+	// creates for a "unix:/path" listen address. Zero means 0600. Peers on a
+	// Unix socket are the operator's own front end (filesystem permissions
+	// decide who can connect), so their forwarding headers are trusted the
+	// way a loopback peer's are.
+	SocketMode os.FileMode
+
 	// Labels supplies the LiveTV identifier -> tab label map. Refreshed lazily.
 	Labels LabelSource
 
@@ -1144,7 +1151,7 @@ func trustedCloudflareConnectingIP(req *http.Request) string {
 }
 
 func trustedHeader(req *http.Request, name string) string {
-	if req == nil || !trustedFrontendRemote(clientAddress(req.RemoteAddr)) {
+	if req == nil || !(trustedFrontendRemote(clientAddress(req.RemoteAddr)) || fromPrivateSocket(req)) {
 		return ""
 	}
 	return firstHeader(req.Header, name)
@@ -1166,6 +1173,17 @@ func trustedForwardedForCount(req *http.Request) int {
 		}
 	}
 	return count
+}
+
+// privateSocketPeerKey marks requests that arrived on the proxy's Unix
+// socket listener.
+type privateSocketPeerKey struct{}
+
+// fromPrivateSocket reports whether req arrived on a Unix socket listener,
+// whose permissions limit who can connect.
+func fromPrivateSocket(req *http.Request) bool {
+	trusted, _ := req.Context().Value(privateSocketPeerKey{}).(bool)
+	return trusted
 }
 
 func trustedFrontendRemote(host string) bool {
@@ -1816,15 +1834,61 @@ func pathIsRewriteCandidate(path string) bool {
 	return liveProviderPathRE.MatchString(path)
 }
 
+// listen opens the TCP or Unix socket listener for ListenAndServe.
+func (p *Proxy) listen(listen string) (net.Listener, error) {
+	path, isUnix := strings.CutPrefix(listen, "unix:")
+	if !isUnix {
+		return net.Listen("tcp", listen)
+	}
+	if path == "" {
+		return nil, errors.New("plexlabelproxy: empty unix socket path")
+	}
+	// Replace a socket left by a previous run, never any other kind of file
+	if fi, err := os.Lstat(path); err == nil {
+		if fi.Mode()&os.ModeSocket == 0 {
+			return nil, fmt.Errorf("plexlabelproxy: %s exists and is not a socket", path)
+		}
+		if err := os.Remove(path); err != nil {
+			return nil, err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, err
+	}
+	mode := p.cfg.SocketMode
+	if mode == 0 {
+		mode = 0o600
+	}
+	if err := os.Chmod(path, mode); err != nil {
+		_ = ln.Close()
+		return nil, err
+	}
+	return ln, nil
+}
+
 // ListenAndServe runs the proxy as an HTTP server until ctx is cancelled.
 // Returns nil on graceful shutdown.
+//
+// listen is a TCP address (127.0.0.1:33240) or "unix:" followed by a socket
+// path. A Unix socket is created with Config.SocketMode (0600 by default),
+// replacing a stale socket left at that path, and removed on shutdown; keep it
+// in a directory only the operator and the front end can enter.
 func (p *Proxy) ListenAndServe(ctx context.Context, listen string) error {
 	srv := &http.Server{
 		Addr:              listen,
 		Handler:           p,
 		ReadHeaderTimeout: 30 * time.Second,
+		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+			if _, ok := c.(*net.UnixConn); ok {
+				return context.WithValue(ctx, privateSocketPeerKey{}, true)
+			}
+			return ctx
+		},
 	}
-	ln, err := net.Listen("tcp", listen)
+	ln, err := p.listen(listen)
 	if err != nil {
 		return err
 	}

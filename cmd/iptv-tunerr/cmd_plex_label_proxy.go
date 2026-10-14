@@ -24,7 +24,8 @@ import (
 // labels. The only place to fix this is on the wire.
 func plexLabelProxyCommands() []commandSpec {
 	cmd := flag.NewFlagSet("plex-label-proxy", flag.ExitOnError)
-	listen := cmd.String("listen", "", "Listen address for the proxy (default: IPTV_TUNERR_PLEX_LABEL_PROXY_LISTEN or 127.0.0.1:33240)")
+	listen := cmd.String("listen", "", "Listen address for the proxy: host:port, or unix:/path/to.sock for a Unix socket (default: IPTV_TUNERR_PLEX_LABEL_PROXY_LISTEN or 127.0.0.1:33240)")
+	socketMode := cmd.String("socket-mode", "0600", "Permission mode (octal) of the Unix socket when -listen is unix:/path")
 	upstream := cmd.String("upstream", "", "Upstream PMS base URL (default: -plex-url, IPTV_TUNERR_PMS_URL, or PLEX_HOST)")
 	token := cmd.String("token", "", "PMS token used to query /livetv/dvrs (default: IPTV_TUNERR_PMS_TOKEN or PLEX_TOKEN)")
 	ownerToken := cmd.String("owner-token", "", "Owner PMS token used only when -elevate-live-tv is enabled (default: IPTV_TUNERR_PMS_OWNER_TOKEN, PLEX_OWNER_TOKEN, or -token/env token)")
@@ -55,13 +56,13 @@ func plexLabelProxyCommands() []commandSpec {
 			FlagSet: cmd,
 			Run: func(_ *config.Config, args []string) {
 				_ = cmd.Parse(args)
-				runPlexLabelProxy(*listen, *upstream, *plexURL, *token, *ownerToken, *stripPrefix, *refreshSec, *spoofIdentity, *elevateAll, *elevateLiveTV, *elevateDiscoveryOnly, *userHeader, *neutralizeOwnerHistory, *noElevateSubscriptions, *noElevateRootIdentity, *noSessionTokenRecovery, *abuseThreshold, *abuseWindow, *abuseDuration, *abuseStateFile, *badAuthCooldown, *auditSummaryInterval)
+				runPlexLabelProxy(*listen, *upstream, *plexURL, *token, *ownerToken, *stripPrefix, *refreshSec, *spoofIdentity, *elevateAll, *elevateLiveTV, *elevateDiscoveryOnly, *userHeader, *neutralizeOwnerHistory, *noElevateSubscriptions, *noElevateRootIdentity, *noSessionTokenRecovery, *socketMode, *abuseThreshold, *abuseWindow, *abuseDuration, *abuseStateFile, *badAuthCooldown, *auditSummaryInterval)
 			},
 		},
 	}
 }
 
-func runPlexLabelProxy(listen, upstream, plexURL, token, ownerToken, stripPrefix string, refreshSec int, spoofIdentity, elevateAll, elevateLiveTV, elevateDiscoveryOnly, userHeader, neutralizeOwnerHistory, noElevateSubscriptions, noElevateRootIdentity, noSessionTokenRecovery bool, abuseThreshold int, abuseWindow, abuseDuration time.Duration, abuseStateFile string, badAuthCooldown, auditSummaryInterval time.Duration) {
+func runPlexLabelProxy(listen, upstream, plexURL, token, ownerToken, stripPrefix string, refreshSec int, spoofIdentity, elevateAll, elevateLiveTV, elevateDiscoveryOnly, userHeader, neutralizeOwnerHistory, noElevateSubscriptions, noElevateRootIdentity, noSessionTokenRecovery bool, socketMode string, abuseThreshold int, abuseWindow, abuseDuration time.Duration, abuseStateFile string, badAuthCooldown, auditSummaryInterval time.Duration) {
 	// Always consult env/aliases so a flag for one field doesn't suppress
 	// fallback resolution for the other.
 	resolved, resolvedToken := resolvePlexAccess(plexURL, token)
@@ -84,6 +85,11 @@ func runPlexLabelProxy(listen, upstream, plexURL, token, ownerToken, stripPrefix
 	}
 	if strings.TrimSpace(token) == "" {
 		log.Print("plex-label-proxy: need -token (or IPTV_TUNERR_PMS_TOKEN / PLEX_TOKEN) to read /livetv/dvrs")
+		os.Exit(1)
+	}
+	mode, err := strconv.ParseUint(strings.TrimSpace(socketMode), 8, 32)
+	if err != nil || mode > 0o777 {
+		log.Printf("plex-label-proxy: invalid -socket-mode %q (want octal, e.g. 0600)", socketMode)
 		os.Exit(1)
 	}
 	ownerToken = resolvePlexOwnerToken(ownerToken, token)
@@ -121,6 +127,7 @@ func runPlexLabelProxy(listen, upstream, plexURL, token, ownerToken, stripPrefix
 		NoElevateSubscriptions: noElevateSubscriptions,
 		NoElevateRootIdentity:  noElevateRootIdentity,
 		NoSessionTokenRecovery: noSessionTokenRecovery,
+		SocketMode:             os.FileMode(mode),
 		Labels:                 cache,
 		SpoofIdentity:          spoofIdentity,
 		TokenAuthorizer:        tokenAuthorizer,
