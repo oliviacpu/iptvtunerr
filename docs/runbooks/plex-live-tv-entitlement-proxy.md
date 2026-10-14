@@ -353,6 +353,11 @@ Two flags narrow elevation further:
   create, edit or delete recordings as the owner.
 - `-no-elevate-root-identity`: `/` and `/identity` always keep the user's
   token. The owner's view of them includes account details.
+- `-no-session-token-recovery`: a request with no Plex token is never elevated.
+  Otherwise, with `-neutralize-owner-history` (or `-elevate-all`), a tokenless
+  Live TV request borrows the token of a recently tracked session matched by
+  session or client identifier and source address. Neither is secret, so use
+  this flag wherever other users can reach the proxy's listener.
 
 `-owner-token` defaults to `IPTV_TUNERR_PMS_OWNER_TOKEN`,
 `PLEX_OWNER_TOKEN`, and then `-token` / `IPTV_TUNERR_PMS_TOKEN` /

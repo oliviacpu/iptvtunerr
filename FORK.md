@@ -55,6 +55,19 @@ Newest first.
 - **Upstream:** not sent / issue or PR link.
 -->
 
+### A switch to turn off token-less session recovery (2026-10-14)
+
+- **What it fixes:** with `-neutralize-owner-history` or `-elevate-all`, a Live TV request carrying no token borrows
+  the token of a session tracked in the last 8 hours. It's matched by session or client identifier plus source address,
+  then elevated to the owner. The identifiers aren't secret, and the source comes from `X-Forwarded-For`, which the
+  proxy believes from any loopback connection. On a host whose loopback other users share, another account could ride
+  a shared user's session.
+- **Cause:** recovery has no off switch; it's tied to session tracking.
+- **Fix:** `-no-session-token-recovery` (`Config.NoSessionTokenRecovery`): a tokenless request is never elevated. The
+  default is unchanged. Documented in the runbook.
+- **Test:** `session_recovery_test.go`, on (the tokenless segment gets the owner token) and off (no token).
+- **Upstream:** not sent.
+
 ### Only canonical request paths are elevated (2026-10-14)
 
 - **What it fixes:** a shared user could reach any owner-only Plex endpoint through a request path that starts like

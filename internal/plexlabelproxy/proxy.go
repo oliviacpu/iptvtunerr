@@ -90,6 +90,16 @@ type Config struct {
 	// ElevateLiveTV.
 	NoElevateRootIdentity bool
 
+	// NoSessionTokenRecovery, when true, never elevates a request that carries
+	// no Plex token. By default a tokenless Live TV request (some clients fetch
+	// HLS segments without one) borrows the token of a session tracked in the
+	// last few hours, matched by session or client identifier and source
+	// address. Those identifiers aren't secret, and the source address comes
+	// from forwarding headers, so on a host other users can reach this closes
+	// a path to a shared user's Live TV access. Sessions are only tracked with
+	// NeutralizeOwnerHistory or ElevateAll.
+	NoSessionTokenRecovery bool
+
 	// Labels supplies the LiveTV identifier -> tab label map. Refreshed lazily.
 	Labels LabelSource
 
@@ -612,7 +622,7 @@ func (p *Proxy) elevateLiveTVRequest(req *http.Request, originalToken string) {
 		return
 	}
 	elevationToken := originalToken
-	if strings.TrimSpace(elevationToken) == "" {
+	if strings.TrimSpace(elevationToken) == "" && !p.cfg.NoSessionTokenRecovery {
 		if token, matched := p.sessionTokenForRequest(req); token != "" {
 			elevationToken = token
 			p.logger.Printf(
