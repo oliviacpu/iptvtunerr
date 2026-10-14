@@ -2,9 +2,11 @@ package plexlabelproxy
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 )
 
@@ -274,7 +276,7 @@ func liveTVElevationMethod(method string) bool {
 
 func queryParamIsLiveTVPath(q url.Values, name string) bool {
 	for _, v := range q[name] {
-		if liveTVText(v) {
+		if liveTVTarget(v) {
 			return true
 		}
 	}
@@ -287,7 +289,7 @@ func queryValuesContainLiveTVPath(q url.Values) bool {
 			continue
 		}
 		for _, v := range values {
-			if liveTVText(v) {
+			if liveTVTarget(v) {
 				return true
 			}
 		}
@@ -332,7 +334,7 @@ func bodyContainsLiveTVPath(req *http.Request) bool {
 			}
 		}
 	}
-	return liveTVText(string(body))
+	return jsonBodyHasLiveTVTarget(body, subscriptionHintKey)
 }
 
 func readRequestBodyForClassification(req *http.Request) ([]byte, bool) {
@@ -361,7 +363,112 @@ func bodyBytesContainLiveTVPath(req *http.Request, body []byte, name string) boo
 			return true
 		}
 	}
-	return liveTVText(string(body))
+	return jsonBodyHasLiveTVTarget(body, func(key string) bool { return strings.EqualFold(key, name) })
+}
+
+// liveTVTarget reports whether a request parameter value names a Live TV
+// resource: an XMLTV guid, an XMLTV EPG provider key, or a path under /livetv/
+// or an XMLTV EPG provider, directly or as the path of a server:// URI. Values
+// are decoded (Plex clients nest escaping) and paths cleaned. The query string
+// and fragment never count, so a library path that only mentions Live TV
+// (/library/metadata/1?x=/livetv/) or climbs out of it
+// (/livetv/../library/metadata/1) is not a Live TV target.
+func liveTVTarget(v string) bool {
+	for i := 0; i < 4; i++ {
+		if liveTVTargetRaw(v) {
+			return true
+		}
+		next, err := url.QueryUnescape(v)
+		if err != nil || next == v {
+			next, err = url.PathUnescape(v)
+			if err != nil || next == v {
+				return false
+			}
+		}
+		v = next
+	}
+	return liveTVTargetRaw(v)
+}
+
+func liveTVTargetRaw(v string) bool {
+	v = strings.TrimSpace(v)
+	lower := strings.ToLower(v)
+	// XMLTV guids identify guide items, not server paths
+	if strings.HasPrefix(lower, "tv.plex.xmltv:") {
+		return true
+	}
+	// A provider-relative key such as tv.plex.providers.epg.xmltv:123/grid
+	// parses as an opaque URI, so treat it as the path it is
+	if strings.HasPrefix(lower, "tv.plex.providers.epg.xmltv:") {
+		if i := strings.IndexAny(v, "?#"); i >= 0 {
+			v = v[:i]
+		}
+		return liveTVPath("/" + v)
+	}
+	u, err := url.Parse(v)
+	if err != nil {
+		return false
+	}
+	if liveTVPath(u.Path) {
+		return true
+	}
+	// server://<machine>/<provider>/<path>: the first segment names the
+	// provider, the rest is the path within it
+	if u.Scheme != "" && u.Host != "" {
+		rest := strings.TrimPrefix(u.Path, "/")
+		if i := strings.Index(rest, "/"); i >= 0 {
+			return liveTVPath(rest[i:])
+		}
+	}
+	return false
+}
+
+// liveTVPath reports whether p, once cleaned, is under /livetv/ or an XMLTV
+// EPG provider.
+func liveTVPath(p string) bool {
+	if p == "" {
+		return false
+	}
+	clean := strings.ToLower(path.Clean(p))
+	return strings.HasPrefix(clean, "/livetv/") ||
+		strings.HasPrefix(clean, "/tv.plex.providers.epg.xmltv:")
+}
+
+// jsonBodyHasLiveTVTarget reports whether a JSON body has a string value,
+// under a key accepted by keyMatches, that names a Live TV target. Other
+// keys and non-JSON bodies don't count: text that merely contains a Live TV
+// path somewhere in the body is not evidence.
+func jsonBodyHasLiveTVTarget(body []byte, keyMatches func(string) bool) bool {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || (trimmed[0] != '{' && trimmed[0] != '[') {
+		return false
+	}
+	var doc any
+	if err := json.Unmarshal(trimmed, &doc); err != nil {
+		return false
+	}
+	var walk func(any) bool
+	walk = func(node any) bool {
+		switch n := node.(type) {
+		case map[string]any:
+			for key, value := range n {
+				if s, ok := value.(string); ok && keyMatches(key) && liveTVTarget(s) {
+					return true
+				}
+				if walk(value) {
+					return true
+				}
+			}
+		case []any:
+			for _, value := range n {
+				if walk(value) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return walk(doc)
 }
 
 func refererIsLiveTV(ref string) bool {

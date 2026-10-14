@@ -54,3 +54,24 @@ Newest first.
 - **Fix:** what changed, with the files.
 - **Upstream:** not sent / issue or PR link.
 -->
+
+### Live TV elevation only for real Live TV targets (2026-10-14)
+
+- **What it fixes:** a shared user could borrow the owner token for library content. A transcode, play queue or
+  subscription request counted as Live TV if a parameter merely contained `/livetv/` somewhere, for example
+  `path=/library/metadata/123?x=/livetv/` (query), `…#/livetv/` (fragment), `/livetv/../library/metadata/123`
+  (dot-dot), or any other form or JSON field mentioning it. Users without access to every library could reach the rest
+  as the owner.
+- **Cause:** `liveTVText` in `internal/plexlabelproxy/entitlement.go` matched substrings of each parameter value and,
+  for request bodies, of the whole body.
+- **Fix:**
+  - **Parameters:** `liveTVTarget` accepts a value only if, decoded, it is an XMLTV guid or provider key, or its
+    cleaned path (query and fragment ignored) is under `/livetv/` or an XMLTV EPG provider, directly or as the path of
+    a `server://` URI.
+  - **Bodies:** form and JSON bodies are checked field by field (the same hint keys); the whole-body text match is
+    gone.
+  - **Referer:** the `Referer` check for `/` and `/identity` is unchanged; see the next change.
+- **Test:** `entitlement_strict_test.go`. The crafted requests above aren't elevated, real Live TV targets still are,
+  and a library transcode mentioning `/livetv/` reaches Plex with the user's token. Before the fix, ten of the crafted
+  requests were elevated.
+- **Upstream:** not sent.
