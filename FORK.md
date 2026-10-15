@@ -20,7 +20,8 @@ it never leaves the proxy.
 
 ## Image and GitHub Actions
 
-- **Image:** `ghcr.io/oliviacpu/iptvtunerr:<tag>` from `Dockerfile.fork-proxy`. It's the `iptv-tunerr` binary only,
+- **Image:** `ghcr.io/oliviacpu/iptvtunerr:<tag>` and `:latest` (the newest tag build, which the deployment runs, so
+  pushing a tag releases it) from `Dockerfile.fork-proxy`. It's the `iptv-tunerr` binary only,
   static, on distroless, for `plex-label-proxy`. It runs as root in the container, which rootless podman maps to the
   host account, so a socket the proxy creates belongs to that account.
 - **Build:** `.github/workflows/fork-image.yml` runs on `oliviacpu-*` tags (or by hand on one). It runs the

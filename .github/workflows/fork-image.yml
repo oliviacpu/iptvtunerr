@@ -1,7 +1,8 @@
 name: Fork image
 
 # This fork's only workflow (every upstream workflow is disabled here; see FORK.md). On an oliviacpu-* tag it runs
-# the plex-label-proxy tests, then builds Dockerfile.fork-proxy and pushes ghcr.io/oliviacpu/iptvtunerr:<tag>.
+# the plex-label-proxy tests, then builds Dockerfile.fork-proxy and pushes ghcr.io/oliviacpu/iptvtunerr:<tag> and :latest
+# (the newest tag build, which the deployment runs, so a tag is a release).
 
 on:
   push:
@@ -13,9 +14,10 @@ permissions:
   contents: read
   packages: write
 
+# One tag build at a time, so the newest-tag check and the :latest retag below never race another build.
 concurrency:
-  group: fork-image-${{ github.ref }}
-  cancel-in-progress: true
+  group: fork-image
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -51,3 +53,17 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ github.ref_name }}
             org.opencontainers.image.licenses=AGPL-3.0-or-later
+
+      # The deployment runs :latest, so a tag is a release. It moves to this build only if the tag is still the newest
+      # oliviacpu-* tag (version order) once the image is pushed, so an older tag's build, or a rerun of one, can't move
+      # it back however the runs overlap.
+      - name: Move latest
+        run: |
+          git fetch --quiet --force --tags origin
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/iptvtunerr"
+          newest=$(git tag -l 'oliviacpu-*' --sort=-v:refname | head -n 1)
+          if [ "$newest" != "$GITHUB_REF_NAME" ]; then
+            echo "::notice::$GITHUB_REF_NAME is older than $newest, so :latest stays put"
+            exit 0
+          fi
+          docker buildx imagetools create --tag "$image:latest" "$image:${GITHUB_REF_NAME}"
