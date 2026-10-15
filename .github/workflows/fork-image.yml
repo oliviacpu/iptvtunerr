@@ -1,7 +1,8 @@
 name: Fork image
 
 # This fork's only workflow (every upstream workflow is disabled here; see FORK.md). On an oliviacpu-* tag it runs
-# the plex-label-proxy tests, then builds Dockerfile.fork-proxy and pushes ghcr.io/oliviacpu/iptvtunerr:<tag>.
+# the plex-label-proxy tests, then builds Dockerfile.fork-proxy and pushes ghcr.io/oliviacpu/iptvtunerr:<tag> and :latest
+# (the newest tag build, which the deployment runs, so a tag is a release).
 
 on:
   push:
@@ -45,7 +46,9 @@ jobs:
           platforms: linux/amd64
           build-args: |
             VERSION=${{ github.ref_name }}
-          tags: ghcr.io/${{ github.repository_owner }}/iptvtunerr:${{ github.ref_name }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/iptvtunerr:${{ github.ref_name }}
+            ghcr.io/${{ github.repository_owner }}/iptvtunerr:latest
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
