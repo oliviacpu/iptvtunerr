@@ -14,9 +14,10 @@ permissions:
   contents: read
   packages: write
 
+# One tag build at a time, so the newest-tag check and the :latest retag below never race another build.
 concurrency:
-  group: fork-image-${{ github.ref }}
-  cancel-in-progress: true
+  group: fork-image
+  cancel-in-progress: false
 
 jobs:
   build:
