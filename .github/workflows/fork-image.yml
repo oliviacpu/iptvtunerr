@@ -30,22 +30,6 @@ jobs:
           docker run --rm -v "$PWD":/src -w /src -e GOFLAGS=-mod=vendor -e GOTOOLCHAIN=local golang:1.26.9 \
             go test ./internal/plexlabelproxy/ ./cmd/iptv-tunerr/
 
-      # :latest goes only on the newest oliviacpu-* tag (version order), so when two tag builds overlap, an older one
-      # finishing last can't move it back.
-      - name: Image tags
-        id: tags
-        run: |
-          git fetch --quiet --force --tags origin
-          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/iptvtunerr"
-          newest=$(git tag -l 'oliviacpu-*' --sort=-v:refname | head -n 1)
-          tags="$image:${GITHUB_REF_NAME}"
-          if [ "$newest" = "$GITHUB_REF_NAME" ]; then
-            tags="$tags,$image:latest"
-          else
-            echo "::notice::$GITHUB_REF_NAME is older than $newest, so :latest stays put"
-          fi
-          echo "tags=$tags" >> "$GITHUB_OUTPUT"
-
       - uses: docker/setup-buildx-action@v4
 
       - uses: docker/login-action@v4
@@ -62,9 +46,23 @@ jobs:
           platforms: linux/amd64
           build-args: |
             VERSION=${{ github.ref_name }}
-          tags: ${{ steps.tags.outputs.tags }}
+          tags: ghcr.io/${{ github.repository_owner }}/iptvtunerr:${{ github.ref_name }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ github.ref_name }}
             org.opencontainers.image.licenses=AGPL-3.0-or-later
+
+      # The deployment runs :latest, so a tag is a release. It moves to this build only if the tag is still the newest
+      # oliviacpu-* tag (version order) once the image is pushed, so an older tag's build, or a rerun of one, can't move
+      # it back however the runs overlap.
+      - name: Move latest
+        run: |
+          git fetch --quiet --force --tags origin
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/iptvtunerr"
+          newest=$(git tag -l 'oliviacpu-*' --sort=-v:refname | head -n 1)
+          if [ "$newest" != "$GITHUB_REF_NAME" ]; then
+            echo "::notice::$GITHUB_REF_NAME is older than $newest, so :latest stays put"
+            exit 0
+          fi
+          docker buildx imagetools create --tag "$image:latest" "$image:${GITHUB_REF_NAME}"
