@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MediaContainer size="3">
+<Channel id="C1.49.tunarr.com" gridKey="C1.49.tunarr.com" vcn="1" thumb="https://example.invalid/ch1.png" title="1 Cartoons" callSign="1 Cartoons" />
+<Channel id="C2.50.tunarr.com" gridKey="C2.50.tunarr.com" vcn="2" thumb="https://example.invalid/ch2.png" title="2 Science" callSign="2 Science" />
+<Channel id="C99.114.tunarr.com" gridKey="C99.114.tunarr.com" vcn="99" thumb="https://example.invalid/ch99.png" title="99 Test" callSign="99 Test" />
+</MediaContainer>

@@ -199,6 +199,9 @@ elevation decision that matters operationally:
   threshold and is now temporarily blocked
 - `outcome=blocked_bad_actor` means a request was rejected by that temporary
   block before it reached PMS
+- `outcome=deny_hidden_channel` means a request for a channel hidden with
+  `-hide-live-channel` came from someone other than the owner or the owner's
+  devices and got 404 without reaching PMS. It doesn't count toward a block
 
 Audit lines are prefixed with `plexlabelproxy_audit:` and include method, path,
 Live TV classifier booleans, a short SHA-256 source fingerprint, trusted
@@ -431,6 +434,70 @@ curl -s -H "X-Plex-Token: $OWNER_TOKEN" http://127.0.0.1:33240/iptvtunerr/live-v
 `PLEX_OWNER_TOKEN`, and then `-token` / `IPTV_TUNERR_PMS_TOKEN` /
 `PLEX_TOKEN`. Prefer env files over command-line token flags so the owner token
 does not show up in process listings.
+
+### Hide channels from shared users (`-hide-live-channel`)
+
+Plex has no per-user channel list: everyone with Live TV sees the DVR's whole
+lineup. Shared users only get Live TV through the proxy, so with
+`-hide-live-channel` the proxy keeps some channels (a test channel, say) to the
+owner:
+
+```bash
+iptv-tunerr plex-label-proxy -elevate-live-tv -hide-live-channel=99 ...
+```
+
+- Name a channel by its number (`99`) or by its guide identifier
+  (`C99.114.tunarr.com`). Repeat the flag or separate values with commas. A
+  number also covers Tunarr's identifier for it, and the DVR's channel map
+  (`/livetv/dvrs`, read at startup and then at most once a minute when a
+  request names an unknown channel) resolves it for other guides. The startup
+  log names what is hidden and whether Plex's channel map has it yet:
+  `plex-label-proxy: hiding Live TV channel(s) from shared users: 99
+  (C99.114.tunarr.com; in Plex's channel map)`.
+- It needs `-elevate-live-tv` (or `-elevate-all`) and the owner token. It is
+  safe to turn on before the channel exists in Plex.
+- **Who sees it:** the owner token, and the owner's own apps. Those sign in with
+  their own tokens, so the proxy tells them apart from shared users by plex.tv's
+  share list (the one `-live-viewers` uses): a token on the list is a shared
+  user's, and stays one even if a later list lacks it; a token missing from a
+  list fetched after the token was first seen is one of the owner's devices.
+  Anything not settled yet, or a request without a token, is treated like a
+  shared user. An unsettled token waits up to 2 seconds for a share-list fetch.
+- **What shared users get:** the channel is removed from Live TV responses, in
+  JSON and XML, gzipped or not: lineup `Channel` entries, guide and hub airings
+  (`Media`; a program left with none goes too), a program's `Channel` tags,
+  search results, the DVR's `ChannelMapping` and the tuner's `DeviceChannel`.
+  `size`, `totalSize` and `X-Plex-Container-Total-Size` are lowered to match,
+  and a changed response gets `Cache-Control: private, no-store`. A tune or any
+  other `/livetv/dvrs/<dvr>/channels/<channel>/...` request for it gets 404 and
+  never reaches Plex. That's audited as `outcome=deny_hidden_channel` and isn't
+  counted toward a block.
+- **Checking it** without a shared user's token: send the owner token with
+  `X-Iptvtunerr-View-As: friend` to get the shared view (the header is ignored
+  for any other token and never passed to Plex):
+
+```bash
+curl -s -H "X-Plex-Token: $OWNER_TOKEN" -H "X-Iptvtunerr-View-As: friend" \
+  "http://127.0.0.1:33240/tv.plex.providers.epg.xmltv:<dvr>/lineups/dvr/channels" | grep -c C99.114 # 0
+curl -s -o /dev/null -w '%{http_code}\n' -X POST -H "X-Plex-Token: $OWNER_TOKEN" -H "X-Iptvtunerr-View-As: friend" \
+  "http://127.0.0.1:33240/livetv/dvrs/<dvr>/channels/C99.114.tunarr.com/tune" # 404
+```
+
+- **Logs:** `plexlabelproxy_hide: outcome=removed path=... viewer=friend
+  removed=<n> token_fp=...` for each response it changed. `outcome=leak_suspect
+  match="..."` means a response still names the channel after filtering: a
+  response shape the filter doesn't know, worth a look. With
+  `-hide-live-channel-debug`, the owner's responses log `outcome=owner_kept
+  present=<n>` (what a shared user wouldn't have seen) and stay unchanged. The
+  audit summary adds `hidden_removed=`, `hidden_refused=` and
+  `hidden_leak_suspect=`.
+- **Gaps:** a show that airs only on the hidden channel still lists in the Live
+  TV source's show and favourites views, with no airings. Plex's WebSocket
+  notifications aren't filtered. A Plex Home member other than the owner whose
+  token isn't on the share list is taken for one of the owner's devices. One of
+  the owner's devices is treated like a shared user until a share list fetched
+  after its token was first seen settles it: about a minute at most, longer
+  while plex.tv is unreachable.
 
 ## Make The Proxy The Only Front Door
 
@@ -687,6 +754,10 @@ block public direct PMS/proxy access.
   to `IsLiveTVRequest` and test with a non-Home account.
 - The proxy does not fix stale Plex DVR/device state. Use the Plex DVR lifecycle
   tools and runbooks for pruning old devices.
+- `-hide-live-channel` hides a channel in the responses the proxy hands out; it
+  is not access control inside Plex. Anyone reaching PMS directly, or a Plex
+  Home member not on the share list, sees it. Response shapes it doesn't know pass unchanged (watch
+  for `outcome=leak_suspect`).
 
 ## Rollback
 

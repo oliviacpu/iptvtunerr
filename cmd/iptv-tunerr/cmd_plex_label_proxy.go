@@ -47,6 +47,9 @@ func plexLabelProxyCommands() []commandSpec {
 	abuseDuration := cmd.Duration("abuse-block-duration", envDuration("IPTV_TUNERR_PROXY_ABUSE_BLOCK_DURATION", 0), "Temporary block duration after threshold (default 30m; env IPTV_TUNERR_PROXY_ABUSE_BLOCK_DURATION)")
 	abuseStateFile := cmd.String("abuse-block-state-file", strings.TrimSpace(os.Getenv("IPTV_TUNERR_PROXY_ABUSE_STATE_FILE")), "Optional JSON state file for persisted bad-source blocks (env IPTV_TUNERR_PROXY_ABUSE_STATE_FILE)")
 	badAuthCooldown := cmd.Duration("bad-auth-cooldown", envDuration("IPTV_TUNERR_PROXY_BAD_AUTH_COOLDOWN", 0), "Cooldown for denied source+token authorization checks (default 2m; negative disables; env IPTV_TUNERR_PROXY_BAD_AUTH_COOLDOWN)")
+	var hideLiveChannels stringListFlag
+	cmd.Var(&hideLiveChannels, "hide-live-channel", "With -elevate-live-tv: hide this Live TV channel (number, e.g. 99, or guide id) from shared users; only the owner and the owner's devices see and tune it. Repeat or comma-separate for several")
+	hideLiveChannelDebug := cmd.Bool("hide-live-channel-debug", false, "With -hide-live-channel: also log, for the owner's requests, how many hidden entries a response had (outcome=owner_kept)")
 	auditSummaryInterval := cmd.Duration("audit-summary-interval", envDuration("IPTV_TUNERR_PROXY_AUDIT_SUMMARY_INTERVAL", 0), "Aggregate audit summary interval (default 5m; negative disables; env IPTV_TUNERR_PROXY_AUDIT_SUMMARY_INTERVAL)")
 
 	return []commandSpec{
@@ -57,13 +60,13 @@ func plexLabelProxyCommands() []commandSpec {
 			FlagSet: cmd,
 			Run: func(_ *config.Config, args []string) {
 				_ = cmd.Parse(args)
-				runPlexLabelProxy(*listen, *upstream, *plexURL, *token, *ownerToken, *stripPrefix, *refreshSec, *spoofIdentity, *elevateAll, *elevateLiveTV, *elevateDiscoveryOnly, *userHeader, *neutralizeOwnerHistory, *noElevateSubscriptions, *noElevateRootIdentity, *noSessionTokenRecovery, *liveViewers, *socketMode, *abuseThreshold, *abuseWindow, *abuseDuration, *abuseStateFile, *badAuthCooldown, *auditSummaryInterval)
+				runPlexLabelProxy(*listen, *upstream, *plexURL, *token, *ownerToken, *stripPrefix, *refreshSec, *spoofIdentity, *elevateAll, *elevateLiveTV, *elevateDiscoveryOnly, *userHeader, *neutralizeOwnerHistory, *noElevateSubscriptions, *noElevateRootIdentity, *noSessionTokenRecovery, *liveViewers, hideLiveChannels, *hideLiveChannelDebug, *socketMode, *abuseThreshold, *abuseWindow, *abuseDuration, *abuseStateFile, *badAuthCooldown, *auditSummaryInterval)
 			},
 		},
 	}
 }
 
-func runPlexLabelProxy(listen, upstream, plexURL, token, ownerToken, stripPrefix string, refreshSec int, spoofIdentity, elevateAll, elevateLiveTV, elevateDiscoveryOnly, userHeader, neutralizeOwnerHistory, noElevateSubscriptions, noElevateRootIdentity, noSessionTokenRecovery, liveViewers bool, socketMode string, abuseThreshold int, abuseWindow, abuseDuration time.Duration, abuseStateFile string, badAuthCooldown, auditSummaryInterval time.Duration) {
+func runPlexLabelProxy(listen, upstream, plexURL, token, ownerToken, stripPrefix string, refreshSec int, spoofIdentity, elevateAll, elevateLiveTV, elevateDiscoveryOnly, userHeader, neutralizeOwnerHistory, noElevateSubscriptions, noElevateRootIdentity, noSessionTokenRecovery, liveViewers bool, hideLiveChannels []string, hideLiveChannelDebug bool, socketMode string, abuseThreshold int, abuseWindow, abuseDuration time.Duration, abuseStateFile string, badAuthCooldown, auditSummaryInterval time.Duration) {
 	// Always consult env/aliases so a flag for one field doesn't suppress
 	// fallback resolution for the other.
 	resolved, resolvedToken := resolvePlexAccess(plexURL, token)
@@ -98,6 +101,10 @@ func runPlexLabelProxy(listen, upstream, plexURL, token, ownerToken, stripPrefix
 		log.Print("plex-label-proxy: need -owner-token (or IPTV_TUNERR_PMS_OWNER_TOKEN / PLEX_OWNER_TOKEN) when -elevate-all or -elevate-live-tv is enabled")
 		os.Exit(1)
 	}
+	if len(hideLiveChannels) > 0 && !(elevateAll || elevateLiveTV) {
+		log.Print("plex-label-proxy: -hide-live-channel needs -elevate-live-tv (shared users only get Live TV through the proxy then)")
+		os.Exit(1)
+	}
 	var tokenAuthorizer plexlabelproxy.TokenAuthorizer
 	if elevateAll || elevateLiveTV {
 		authorizer, err := plexlabelproxy.NewPlexTokenAuthorizer(upstream, ownerToken, nil)
@@ -129,6 +136,8 @@ func runPlexLabelProxy(listen, upstream, plexURL, token, ownerToken, stripPrefix
 		NoElevateRootIdentity:  noElevateRootIdentity,
 		NoSessionTokenRecovery: noSessionTokenRecovery,
 		LiveViewers:            liveViewers,
+		HideLiveChannels:       hideLiveChannels,
+		HideLiveChannelsDebug:  hideLiveChannelDebug,
 		// read from the environment only, so it never shows in process listings
 		LiveViewersKey:       strings.TrimSpace(os.Getenv("IPTV_TUNERR_PROXY_LIVE_VIEWERS_KEY")),
 		SocketMode:           os.FileMode(mode),
@@ -149,6 +158,12 @@ func runPlexLabelProxy(listen, upstream, plexURL, token, ownerToken, stripPrefix
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	if len(hideLiveChannels) > 0 {
+		mapCtx, mapCancel := context.WithTimeout(ctx, 15*time.Second)
+		log.Printf("plex-label-proxy: hiding Live TV channel(s) from shared users: %s", proxy.HiddenLiveChannels(mapCtx))
+		mapCancel()
+	}
 
 	log.Printf("plex-label-proxy: starting on %s -> %s (elevate_all=%v elevate_live_tv=%v discovery_only=%v neutralize_owner=%v no_elevate_subscriptions=%v no_elevate_root_identity=%v no_session_token_recovery=%v live_viewers=%v spoof_identity=%v strip_prefix=%q)",
 		listen, upstream, elevateAll, elevateLiveTV, elevateDiscoveryOnly, neutralizeOwnerHistory, noElevateSubscriptions, noElevateRootIdentity, noSessionTokenRecovery, liveViewers, spoofIdentity, stripPrefix)
@@ -200,4 +215,19 @@ func resolvePlexOwnerToken(flagOwnerToken, fallbackToken string) string {
 		return t
 	}
 	return strings.TrimSpace(fallbackToken)
+}
+
+// stringListFlag is a repeatable string flag; each use may also list several
+// values separated by commas.
+type stringListFlag []string
+
+func (f *stringListFlag) String() string { return strings.Join(*f, ",") }
+
+func (f *stringListFlag) Set(v string) error {
+	for _, part := range strings.Split(v, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			*f = append(*f, part)
+		}
+	}
+	return nil
 }

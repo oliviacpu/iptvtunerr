@@ -84,6 +84,19 @@ type liveViewerTracker struct {
 	lastOKAt    time.Time
 	// loggers holds a slot per running new-viewer lookup (maxViewerLoggers).
 	loggers chan struct{}
+
+	// For -hide-live-channel (classify): friends holds every token
+	// fingerprint a share list has named, so a later list that lacks it (an
+	// empty or failed answer from plex.tv) can't make a friend look like one
+	// of the owner's devices. firstSeen is when a token was first classified.
+	// classifiedAt is when the last share list trusted for classification was
+	// fetched (its start); a list that comes back empty right after a non-empty
+	// one isn't trusted until a second one agrees (emptyOnce).
+	friends      map[string]time.Time
+	firstSeen    map[string]time.Time
+	classifiedAt time.Time
+	lastListSize int
+	emptyOnce    bool
 }
 
 // shareList is plex.tv's share list for the server: shared users by token
@@ -100,6 +113,8 @@ func newLiveViewerTracker(fetch func(ctx context.Context) (shareList, error)) *l
 		accounts:      make(map[string]plexAccount),
 		retryAfter:    accountsRetry,
 		loggers:       make(chan struct{}, maxViewerLoggers),
+		friends:       make(map[string]time.Time),
+		firstSeen:     make(map[string]time.Time),
 	}
 }
 
@@ -219,11 +234,24 @@ func (t *liveViewerTracker) refreshAccounts(ctx context.Context, now time.Time) 
 		}
 		return nil
 	}
-	missing := false
+	// An empty share list that isn't trusted yet is asked again soon.
+	missing := t.emptyOnce
 	for _, e := range t.clients {
 		if _, ok := t.accounts[e.tokenFP]; !ok && e.since.After(t.fetchedAt) {
 			missing = true
 			break
+		}
+	}
+	// A token classify hasn't settled yet (first seen since the last fetch)
+	// needs a fresh list too.
+	for fp, seen := range t.firstSeen {
+		if missing {
+			break
+		}
+		_, shared := t.accounts[fp]
+		_, friend := t.friends[fp]
+		if !shared && !friend && seen.After(t.fetchedAt) {
+			missing = true
 		}
 	}
 	stale := t.fetchedAt.IsZero() || now.Sub(t.fetchedAt) > accountsMaxAge
@@ -245,11 +273,115 @@ func (t *liveViewerTracker) refreshAccounts(ctx context.Context, now time.Time) 
 		t.accounts = list.accounts
 		t.machineID = list.machineIdentifier
 		t.fetchedAt = now
+		for fp := range list.accounts {
+			t.friends[fp] = now
+		}
+		t.pruneTokensLocked(now)
+		// A list that's suddenly empty may be plex.tv misbehaving: trusting it
+		// would make every newly seen friend look like an owner device. A
+		// second empty list in a row is believed (everyone was unshared).
+		if len(list.accounts) == 0 && t.lastListSize > 0 && !t.emptyOnce {
+			t.emptyOnce = true
+		} else {
+			t.emptyOnce = false
+			t.lastListSize = len(list.accounts)
+			t.classifiedAt = now
+		}
 	}
 	t.refreshing = nil
 	t.mu.Unlock()
 	close(done)
 	return err
+}
+
+// viewerClass is who a Live TV caller is, for -hide-live-channel.
+type viewerClass int
+
+const (
+	// viewerUnsettled: not known yet (no share list fetched since the token
+	// was first seen, or no token). Treated like a friend.
+	viewerUnsettled viewerClass = iota
+	// viewerFriend: the token is on the server's share list (now or before).
+	viewerFriend
+	// viewerOwnerDevice: one of the owner's own apps. Its token isn't on a
+	// share list fetched after the token was first seen.
+	viewerOwnerDevice
+	// viewerOwner: the owner token itself.
+	viewerOwner
+	// viewerPreview: the owner asking to see a response as a friend would.
+	viewerPreview
+)
+
+func (c viewerClass) String() string {
+	switch c {
+	case viewerFriend:
+		return "friend"
+	case viewerOwnerDevice:
+		return "owner_device"
+	case viewerOwner:
+		return "owner"
+	case viewerPreview:
+		return "preview"
+	}
+	return "unsettled"
+}
+
+// seesHiddenChannels reports whether this caller sees channels hidden with
+// -hide-live-channel: the owner and the owner's devices.
+func (c viewerClass) seesHiddenChannels() bool {
+	return c == viewerOwner || c == viewerOwnerDevice
+}
+
+// maxTrackedTokens bounds the friends and firstSeen tables, and
+// trackedTokenTTL is how long a token is kept after it was last noted.
+const (
+	maxTrackedTokens = 1000
+	trackedTokenTTL  = 24 * time.Hour
+)
+
+// classify says who the token with fingerprint fp belongs to, and whether
+// that's settled. Not settled (a token first seen since the last trusted
+// share list), the caller refreshes the list and asks again.
+func (t *liveViewerTracker) classify(fp string, now time.Time) (viewerClass, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, ok := t.accounts[fp]; ok {
+		t.friends[fp] = now
+		return viewerFriend, true
+	}
+	if _, ok := t.friends[fp]; ok {
+		t.friends[fp] = now
+		return viewerFriend, true
+	}
+	seen, ok := t.firstSeen[fp]
+	if !ok {
+		seen = now
+		t.firstSeen[fp] = now
+		t.pruneTokensLocked(now)
+	}
+	if !t.classifiedAt.IsZero() && !t.classifiedAt.Before(seen) {
+		return viewerOwnerDevice, true
+	}
+	return viewerUnsettled, false
+}
+
+func (t *liveViewerTracker) pruneTokensLocked(now time.Time) {
+	for _, m := range []map[string]time.Time{t.friends, t.firstSeen} {
+		for fp, at := range m {
+			if now.Sub(at) > trackedTokenTTL {
+				delete(m, fp)
+			}
+		}
+		for len(m) > maxTrackedTokens {
+			oldest, oldestAt := "", now
+			for fp, at := range m {
+				if oldest == "" || at.Before(oldestAt) {
+					oldest, oldestAt = fp, at
+				}
+			}
+			delete(m, oldest)
+		}
+	}
 }
 
 func (t *liveViewerTracker) list(now time.Time) []LiveViewer {
@@ -284,7 +416,7 @@ type pendingLiveViewer struct {
 // The proxy's Director runs before PMS answers, so the viewer is recorded
 // later, by recordAcceptedLiveViewer, and only if PMS accepted the start.
 func (p *Proxy) markLiveViewer(req *http.Request, token string) {
-	if p.viewers == nil || !IsLiveTVStreamRequest(req) {
+	if p.viewers == nil || !p.cfg.LiveViewers || !IsLiveTVStreamRequest(req) {
 		return
 	}
 	token = strings.TrimSpace(token)

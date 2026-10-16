@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MediaContainer size="4">
+<Video ratingKey="tv.example.invalid/a" key="/tv.plex.providers.epg.xmltv:4/metadata/a" type="episode" title="On Science" grandparentTitle="Example Show" duration="1800000">
+<Media id="101" duration="1800000" audioChannels="2" videoResolution="480" channelCallSign="2 Science" channelIdentifier="C2.50.tunarr.com" channelThumb="https://example.invalid/ch2.png" channelTitle="2 2 Science" channelVcn="2" protocol="livetv" beginsAt="1700000000" endsAt="1700001800" channelID="1">
+</Media>
+<Image alt="On Science" type="coverPoster" url="https://example.invalid/poster.jpg" />
+<Channel id="1" filter="channel=1" tag="2 2 Science" />
+</Video>
+<Video ratingKey="tv.example.invalid/b" key="/tv.plex.providers.epg.xmltv:4/metadata/b" type="episode" title="Only On Test" grandparentTitle="Example Show" duration="1800000">
+<Media id="107" duration="1800000" audioChannels="2" videoResolution="480" channelCallSign="99 Test" channelIdentifier="C99.114.tunarr.com" channelThumb="https://example.invalid/ch99.png" channelTitle="99 99 Test" channelVcn="99" protocol="livetv" beginsAt="1700000000" endsAt="1700001800" channelID="7">
+</Media>
+<Image alt="Only On Test" type="coverPoster" url="https://example.invalid/poster.jpg" />
+<Channel id="7" filter="channel=7" tag="99 99 Test" />
+</Video>
+<Video ratingKey="tv.example.invalid/c" key="/tv.plex.providers.epg.xmltv:4/metadata/c" type="episode" title="On Science And Test" grandparentTitle="Example Show" duration="1800000">
+<Media id="101" duration="1800000" audioChannels="2" videoResolution="480" channelCallSign="2 Science" channelIdentifier="C2.50.tunarr.com" channelThumb="https://example.invalid/ch2.png" channelTitle="2 2 Science" channelVcn="2" protocol="livetv" beginsAt="1700000000" endsAt="1700001800" channelID="1">
+</Media>
+<Media id="107" duration="1800000" audioChannels="2" videoResolution="480" channelCallSign="99 Test" channelIdentifier="C99.114.tunarr.com" channelThumb="https://example.invalid/ch99.png" channelTitle="99 99 Test" channelVcn="99" protocol="livetv" beginsAt="1700000000" endsAt="1700001800" channelID="7">
+</Media>
+<Image alt="On Science And Test" type="coverPoster" url="https://example.invalid/poster.jpg" />
+<Channel id="1" filter="channel=1" tag="2 2 Science" />
+<Channel id="7" filter="channel=7" tag="99 99 Test" />
+</Video>
+<Video ratingKey="tv.example.invalid/d" key="/tv.plex.providers.epg.xmltv:4/metadata/d" type="episode" title="On Cartoons" grandparentTitle="Example Show" duration="1800000">
+<Media id="103" duration="1800000" audioChannels="2" videoResolution="480" channelCallSign="1 Cartoons" channelIdentifier="C1.49.tunarr.com" channelThumb="https://example.invalid/ch1.png" channelTitle="1 1 Cartoons" channelVcn="1" protocol="livetv" beginsAt="1700000000" endsAt="1700001800" channelID="3">
+</Media>
+<Image alt="On Cartoons" type="coverPoster" url="https://example.invalid/poster.jpg" />
+<Channel id="3" filter="channel=3" tag="1 1 Cartoons" />
+</Video>
+</MediaContainer>
