@@ -75,13 +75,15 @@ Newest first.
     `X-Plex-Content-*-Length` dropped and `Cache-Control: private, no-store`. Gzip is kept. A request naming a hidden
     channel under `/livetv/dvrs/<dvr>/channels/` gets 404 without reaching PMS (`deny_hidden_channel`, not a bad
     attempt). A number also covers Tunarr's identifier (`C<n>.<digit sum>.tunarr.com`) and resolves through the
-    DVR channel map (`/livetv/dvrs`, cached, refetched at most once a minute); identifiers, numbers, Plex channel
-    ids and titles are also learned from the responses.
+    DVR channel map (`/livetv/dvrs`, cached, refetched at most once a minute, and before filtering while a
+    configured identifier has no number: the tuner's channel list names channels by number only); identifiers,
+    numbers, Plex channel ids and titles are also learned from the responses. A Tunarr identifier gives its number.
   - Who's the owner: the owner token, or a token missing from a plex.tv share list fetched after it was first seen
-    (the owner's own apps); a token on a share list is a shared user's for good (24 hours after last seen, 1000 at
-    most). Unsettled callers and requests without a token get the shared view, after waiting up to 2 seconds for a
-    share-list fetch. `liveviewers.go`'s tracker does this (`classify`); it's created for either feature, and only
-    a successful fetch settles anyone. A share list that's suddenly empty isn't trusted until a second one agrees.
+    (the owner's own apps); a token on a share list is a shared user's for good. Tokens are remembered 24 hours
+    after they were last seen, 1000 at most. Unsettled callers and requests without a token get the shared view,
+    after waiting up to 2 seconds for a share-list fetch. `liveviewers.go`'s tracker does this (`classify`); it's
+    created for either feature, and only a successful fetch settles anyone. A share list that's suddenly empty
+    isn't trusted until a second one agrees.
   - Checking it: `plexlabelproxy_hide: outcome=removed|leak_suspect|unparsed` lines and `hidden_removed=`,
     `hidden_refused=`, `hidden_leak_suspect=` in the summary; `-hide-live-channel-debug` logs `outcome=owner_kept
     present=<n>` for the owner's responses; the owner token with `X-Iptvtunerr-View-As: friend` gets the shared
@@ -97,10 +99,11 @@ Newest first.
   shared user dropped from a later list stays hidden; a suddenly empty list isn't trusted at once; the tune of 99
   by identifier or number gets 404, never reaches PMS and doesn't block the user, while channel 2 and the owner's
   and owner device's 99 pass; an identifier from the DVR channel map, at startup and lazily, with the map cached;
-  the preview header works for the owner token only and never reaches PMS; off by default; a response without 99
-  is byte-identical; an empty body is skipped; an unknown shape naming 99 is flagged `leak_suspect`; debug counts
-  without changing; no raw token in any test's logs. `cmd_plex_label_proxy_test.go`: the flag repeats and splits
-  commas.
+  a guide identifier hides the tuner's channel (Tunarr's at once, another once the map pairs it) and an owner device
+  in use stays remembered past 24 hours; the preview header works for the owner token only and never reaches PMS;
+  off by default; a response without 99 is byte-identical; an empty body is skipped; an unknown shape naming 99 is
+  flagged `leak_suspect`; debug counts without changing; no raw token in any test's logs.
+  `cmd_plex_label_proxy_test.go`: the flag repeats and splits commas.
 - **Upstream:** not sent.
 
 ### Who is watching Live TV: `-live-viewers` (2026-10-16)

@@ -12,6 +12,7 @@
 - **Plex's WebSocket notifications aren't filtered**, so a client may briefly learn of activity on a hidden channel (no lineup or tune).
 - **A Plex Home member other than the owner** whose token isn't on plex.tv's share list is taken for one of the owner's devices and sees hidden channels. The Home is only the owner today.
 - **One of the owner's devices is treated like a shared user** until a share list fetched after its token was first seen settles it: about a minute (the share list's retry delay), longer while plex.tv is unreachable.
+- **A guide identifier other than Tunarr's** hides the tuner's channel list entry (`/media/grabbers/devices/<n>/channels`, numbers only) only once Plex's DVR channel map pairs it with a number. Configure hidden channels by number.
 - **Unknown response shapes pass unchanged**; `outcome=leak_suspect` flags one that still names a hidden channel.
 
 ## Security

@@ -66,8 +66,13 @@ type hiddenChannels struct {
 	// id on an item); titles the "<vcn> <callSign>" channel titles that
 	// Channel tags carry.
 	numbers, idents, plexIDs, titles map[string]bool
-	mapTriedAt                       time.Time
-	mapResolved                      bool
+	// unpaired holds configured identifiers whose channel number isn't known
+	// yet: the tuner's channel list names channels by number only, so until
+	// the DVR channel map (or a response) pairs them, it's refetched before
+	// filtering.
+	unpaired    map[string]bool
+	mapTriedAt  time.Time
+	mapResolved bool
 }
 
 type channelMapping struct {
@@ -99,15 +104,21 @@ func newHiddenChannels(values []string, fetchMap func(ctx context.Context) ([]ch
 		idents:     map[string]bool{},
 		plexIDs:    map[string]bool{},
 		titles:     map[string]bool{},
+		unpaired:   map[string]bool{},
 	}
 	for _, v := range values {
-		if isChannelNumber(v) {
+		switch {
+		case isChannelNumber(v):
 			h.numbers[v] = true
 			// Tunarr's XMLTV id for a channel number, which is what Plex keys
 			// the channel by: known before the channel map lists it.
 			addNonEmpty(h.idents, tunarrChannelID(v))
-		} else {
+		case tunarrChannelNumber(v) != "":
 			h.idents[v] = true
+			h.numbers[tunarrChannelNumber(v)] = true
+		default:
+			h.idents[v] = true
+			h.unpaired[v] = true
 		}
 	}
 	return h
@@ -140,6 +151,36 @@ func tunarrChannelID(number string) string {
 	return fmt.Sprintf("C%s.%d.tunarr.com", number, sum)
 }
 
+var tunarrChannelIDRE = regexp.MustCompile(`^C([1-9][0-9]*)\.[0-9]+\.tunarr\.com$`)
+
+// tunarrChannelNumber is the channel number in a Tunarr XMLTV id, or "" when
+// ident isn't one.
+func tunarrChannelNumber(ident string) string {
+	m := tunarrChannelIDRE.FindStringSubmatch(ident)
+	if m == nil || tunarrChannelID(m[1]) != ident {
+		return ""
+	}
+	return m[1]
+}
+
+// pairLocked notes that ident's channel number is known (any of numbers).
+func (h *hiddenChannels) pairLocked(ident string, numbers ...string) {
+	for _, n := range numbers {
+		if strings.TrimSpace(n) != "" {
+			delete(h.unpaired, ident)
+			return
+		}
+	}
+}
+
+// needsMap reports whether a configured identifier still lacks its channel
+// number, so the DVR channel map should be (re)read before filtering.
+func (h *hiddenChannels) needsMap() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.unpaired) > 0
+}
+
 func addNonEmpty(m map[string]bool, values ...string) {
 	for _, v := range values {
 		if v = strings.TrimSpace(v); v != "" {
@@ -168,6 +209,7 @@ func (h *hiddenChannels) refreshMap(ctx context.Context) {
 		if h.numbers[m.lineupID] || h.numbers[m.deviceID] || h.idents[m.key] {
 			addNonEmpty(h.idents, m.key)
 			addNonEmpty(h.numbers, m.lineupID, m.deviceID)
+			h.pairLocked(m.key, m.lineupID, m.deviceID)
 			h.mapResolved = true
 		}
 	}
@@ -209,6 +251,7 @@ func (h *hiddenChannels) entryHidden(name string, get func(string) string) bool 
 		if h.idents[get("channelIdentifier")] || h.numbers[get("channelVcn")] {
 			addNonEmpty(h.idents, get("channelIdentifier"))
 			addNonEmpty(h.numbers, get("channelVcn"))
+			h.pairLocked(get("channelIdentifier"), get("channelVcn"))
 			addNonEmpty(h.plexIDs, get("channelID"))
 			addNonEmpty(h.titles, get("channelTitle"))
 			return true
@@ -218,6 +261,7 @@ func (h *hiddenChannels) entryHidden(name string, get func(string) string) bool 
 		if h.idents[get("channelKey")] || h.numbers[get("lineupIdentifier")] || h.numbers[get("deviceIdentifier")] {
 			addNonEmpty(h.idents, get("channelKey"))
 			addNonEmpty(h.numbers, get("lineupIdentifier"), get("deviceIdentifier"))
+			h.pairLocked(get("channelKey"), get("lineupIdentifier"), get("deviceIdentifier"))
 			return true
 		}
 	case "DeviceChannel":
@@ -235,6 +279,9 @@ func (h *hiddenChannels) entryHidden(name string, get func(string) string) bool 
 			addNonEmpty(h.idents, get("id"), get("gridKey"), get("key"))
 			if vcn := firstNonEmpty(get("vcn"), get("channelVcn")); vcn != "" {
 				h.numbers[vcn] = true
+				for _, k := range []string{"id", "gridKey", "key"} {
+					h.pairLocked(get(k), vcn)
+				}
 				if cs := get("callSign"); cs != "" {
 					h.titles[vcn+" "+cs] = true
 				}
@@ -756,6 +803,10 @@ func (p *Proxy) hideLiveChannelEntries(resp *http.Response) error {
 
 	out := body
 	if onPath {
+		if p.hidden.needsMap() {
+			// The tuner's channels are named by number only.
+			p.hidden.refreshMap(resp.Request.Context())
+		}
 		run := &hideRun{h: p.hidden}
 		var filtered []byte
 		var changed bool

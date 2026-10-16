@@ -51,6 +51,7 @@ type hideFixture struct {
 	gzip             atomic.Bool
 	plexTVDown       atomic.Bool
 	friendUnshared   atomic.Bool
+	dvrsDown         atomic.Bool
 	shareListFetches atomic.Int32
 	logs             syncBuffer
 
@@ -110,6 +111,10 @@ func (f *hideFixture) servePMS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_, _ = w.Write([]byte(`<MediaContainer machineIdentifier="machine-1"/>`))
+		return
+	}
+	if r.URL.Path == "/livetv/dvrs" && f.dvrsDown.Load() {
+		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}
 	asJSON := strings.Contains(r.Header.Get("Accept"), "json")
@@ -637,18 +642,80 @@ func TestLiveViewerTracker_ClassifyBoundsWhatItRemembers(t *testing.T) {
 		tr.classify(fmt.Sprintf("fp-%d", i), t0.Add(time.Duration(i)*time.Millisecond))
 	}
 	tr.mu.Lock()
-	n := len(tr.firstSeen)
+	n := len(tr.seen)
 	tr.mu.Unlock()
 	if n > maxTrackedTokens {
 		t.Fatalf("remembers %d tokens, want at most %d", n, maxTrackedTokens)
 	}
 	tr.classify("fp-late", t0.Add(trackedTokenTTL+time.Hour))
 	tr.mu.Lock()
-	n = len(tr.firstSeen)
+	n = len(tr.seen)
 	tr.mu.Unlock()
 	if n != 1 {
 		t.Fatalf("remembers %d tokens after a day, want 1", n)
 	}
+}
+
+func TestLiveViewerTracker_ClassifyKeepsAnActiveOwnerDevice(t *testing.T) {
+	tr := newLiveViewerTracker(func(context.Context) (shareList, error) {
+		return shareList{accounts: map[string]plexAccount{"fp-friend": {id: "42"}}, machineIdentifier: "m"}, nil
+	})
+	t0 := time.Unix(1_800_000_000, 0)
+	tr.classify("fp-device", t0)
+	_ = tr.refreshAccounts(context.Background(), t0.Add(time.Second))
+	for _, at := range []time.Duration{time.Minute, 23 * time.Hour, 46 * time.Hour} {
+		// A new token prunes the table; the device, used within the last
+		// 24 hours, stays remembered as the owner's.
+		tr.classify(fmt.Sprintf("fp-new-%s", at), t0.Add(at))
+		if c, settled := tr.classify("fp-device", t0.Add(at)); c != viewerOwnerDevice || !settled {
+			t.Fatalf("at +%s the owner's device is %s settled=%v", at, c, settled)
+		}
+	}
+}
+
+func TestHideLiveChannel_HidesTheTunerChannelOfAGuideIdentifier(t *testing.T) {
+	deviceChannels := func(t *testing.T, p *Proxy) containerSummary {
+		t.Helper()
+		return summarizeContainer(t, hideBody(t, hideServe(p, http.MethodGet, "/media/grabbers/devices/1/channels", "friend-token", "json")), "json")
+	}
+	t.Run("tunarr identifier without the channel map", func(t *testing.T) {
+		f := newHideFixture(t)
+		f.dvrsDown.Store(true)
+		p := f.proxy(t, func(c *Config) { c.HideLiveChannels = []string{hiddenIdent} })
+		if s := deviceChannels(t, p); s.entries["DeviceChannel"] != 2 || s.size != "2" {
+			t.Errorf("tuner channels %+v, want 99's removed", s)
+		}
+	})
+	t.Run("other identifier once the channel map pairs it", func(t *testing.T) {
+		f := newHideFixture(t)
+		f.mu.Lock()
+		f.dvrsXML = `<MediaContainer size="1"><Dvr key="4"><Device key="1">
+<ChannelMapping channelKey="example-99" deviceIdentifier="99" enabled="1" lineupIdentifier="99"/>
+</Device></Dvr></MediaContainer>`
+		f.mu.Unlock()
+		f.dvrsDown.Store(true)
+		p := f.proxy(t, func(c *Config) { c.HideLiveChannels = []string{"example-99"} })
+		if desc := p.HiddenLiveChannels(context.Background()); !strings.Contains(desc, "not in Plex's channel map yet") {
+			t.Errorf("startup description %q", desc)
+		}
+		// PMS answers again a minute later.
+		f.dvrsDown.Store(false)
+		p.hidden.mu.Lock()
+		p.hidden.mapTriedAt = time.Now().Add(-2 * hiddenMapMaxAge)
+		p.hidden.mu.Unlock()
+		if s := deviceChannels(t, p); s.entries["DeviceChannel"] != 2 || s.size != "2" {
+			t.Errorf("tuner channels %+v, want 99's removed", s)
+		}
+		// Paired, the map isn't fetched for every response.
+		calls := f.callsTo("/livetv/dvrs")
+		p.hidden.mu.Lock()
+		p.hidden.mapTriedAt = time.Now().Add(-2 * hiddenMapMaxAge)
+		p.hidden.mu.Unlock()
+		deviceChannels(t, p)
+		if n := f.callsTo("/livetv/dvrs"); n != calls {
+			t.Errorf("channel map fetched again (%d -> %d) once paired", calls, n)
+		}
+	})
 }
 
 func TestHideLiveChannel_RefusesToTuneIt(t *testing.T) {
@@ -877,7 +944,7 @@ func TestHideLiveChannel_DebugCountsWhatTheOwnerKeeps(t *testing.T) {
 
 func TestTunarrChannelID(t *testing.T) {
 	for number, want := range map[string]string{
-		"99":  "C99.114.tunarr.com",
+		"99":  hiddenIdent,
 		"1":   "C1.49.tunarr.com",
 		"2":   "C2.50.tunarr.com",
 		"10":  "C10.97.tunarr.com",
@@ -887,6 +954,14 @@ func TestTunarrChannelID(t *testing.T) {
 	} {
 		if got := tunarrChannelID(number); got != want {
 			t.Errorf("tunarrChannelID(%q) = %q, want %q", number, got, want)
+		}
+		if want != "" && tunarrChannelNumber(want) != number {
+			t.Errorf("tunarrChannelNumber(%q) = %q, want %q", want, tunarrChannelNumber(want), number)
+		}
+	}
+	for _, ident := range []string{"C99.115.tunarr.com", "C099.162.tunarr.com", "C99.114.tunarr.com.example.invalid", "example-99"} {
+		if n := tunarrChannelNumber(ident); n != "" {
+			t.Errorf("tunarrChannelNumber(%q) = %q, want none", ident, n)
 		}
 	}
 }
