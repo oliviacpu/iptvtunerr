@@ -53,27 +53,26 @@ const (
 // nested in one (a transcode's path, a play queue's uri).
 var liveTVChannelPathRE = regexp.MustCompile(`^/livetv/dvrs/[^/]+/channels/([^/]+)(?:/|$)`)
 
-// hiddenChannels matches the entries of hidden channels in Plex responses.
-// A channel is named by its number (the guide's vcn, the channel mapping's
-// lineup and device identifiers), which hides that number on every DVR, or by
-// its identifier (the XMLTV channel id, e.g. C99.114.tunarr.com), which hides
-// that channel only. A number's identifiers come from Tunarr's pattern, the
-// DVR channel map and the responses that pass through.
+// hiddenChannels is what's hidden. A channel is named by its number (the
+// guide's vcn, the channel mapping's lineup and device identifiers), which
+// hides that number on every DVR, or by its identifier (the XMLTV channel id,
+// e.g. C99.114.tunarr.com), which hides that channel only. Nothing is learned
+// from responses: a number's identifiers come from Tunarr's pattern and the
+// current DVR channel map.
 type hiddenChannels struct {
 	configured []string
 	fetchMap   func(ctx context.Context) ([]channelMapping, error)
+	// numbers and identValues are the configured numbers and identifiers;
+	// tunarrIdents Tunarr's identifiers for the numbers. None change.
+	numbers, identValues, tunarrIdents map[string]bool
 
 	mu sync.Mutex
-	// numbers are the configured hidden numbers; idents the hidden channels'
-	// identifiers; plexIDs Plex's internal channel ids (Media channelID, the
-	// Channel tag id on an item); titles the "<vcn> <callSign>" channel
-	// titles, for Channel tags without an id and the leak check.
-	numbers, idents, plexIDs, titles map[string]bool
-	// tunerChannels holds "<device>\x00<tuner channel>" for a hidden
-	// identifier's tuner channel, as the DVR channel map pairs them: the
-	// tuner's channel list names channels by number only, and the same number
-	// may be another channel on another device.
-	tunerChannels map[string]bool
+	// mapIdents are the identifiers the last DVR channel map gives the hidden
+	// numbers, and tunerChannels "<device>\x00<tuner channel>" for the
+	// configured identifiers (the tuner's channel list names channels by
+	// number only, and the same number may be another channel on another
+	// device). Each map replaces both, never changing them in place.
+	mapIdents, tunerChannels map[string]bool
 	// unpaired holds configured identifiers the DVR channel map hasn't paired
 	// with a tuner channel; while there are any, the map is refetched (at most
 	// every hiddenMapMaxAge) before filtering. It's also refetched before a
@@ -109,9 +108,9 @@ func newHiddenChannels(values []string, fetchMap func(ctx context.Context) ([]ch
 		configured:    values,
 		fetchMap:      fetchMap,
 		numbers:       map[string]bool{},
-		idents:        map[string]bool{},
-		plexIDs:       map[string]bool{},
-		titles:        map[string]bool{},
+		identValues:   map[string]bool{},
+		tunarrIdents:  map[string]bool{},
+		mapIdents:     map[string]bool{},
 		tunerChannels: map[string]bool{},
 		unpaired:      map[string]bool{},
 	}
@@ -120,9 +119,9 @@ func newHiddenChannels(values []string, fetchMap func(ctx context.Context) ([]ch
 			h.numbers[v] = true
 			// Tunarr's XMLTV id for a channel number, which is what Plex keys
 			// the channel by: known before the channel map lists it.
-			addNonEmpty(h.idents, tunarrChannelID(v))
+			addNonEmpty(h.tunarrIdents, tunarrChannelID(v))
 		} else {
-			h.idents[v] = true
+			h.identValues[v] = true
 			h.unpaired[v] = true
 		}
 	}
@@ -187,17 +186,14 @@ func (h *hiddenChannels) refreshMap(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	// The identifiers' tuner pairings are rebuilt from each map, as Plex may
-	// have moved a channel to another tuner channel.
-	tuner, paired, resolved := map[string]bool{}, map[string]bool{}, false
+	// Rebuilt from each map, as Plex may have moved a channel.
+	idents, tuner, paired, resolved := map[string]bool{}, map[string]bool{}, map[string]bool{}, false
 	for _, m := range mappings {
 		switch {
 		case h.numbers[m.lineupID] || h.numbers[m.deviceID]:
-			addNonEmpty(h.idents, m.key)
+			addNonEmpty(idents, m.key)
 			resolved = true
-		case h.idents[m.key]:
+		case h.identValues[m.key]:
 			if m.deviceID != "" {
 				tuner[m.device+"\x00"+m.deviceID] = true
 				paired[m.key] = true
@@ -205,83 +201,95 @@ func (h *hiddenChannels) refreshMap(ctx context.Context) {
 			resolved = true
 		}
 	}
-	h.tunerChannels, h.mapResolved = tuner, resolved
-	for _, v := range h.configured {
-		if !isChannelNumber(v) && !paired[v] {
-			h.unpaired[v] = true
-		} else {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.mapIdents, h.tunerChannels, h.mapResolved = idents, tuner, resolved
+	for v := range h.identValues {
+		if paired[v] {
 			delete(h.unpaired, v)
+		} else {
+			h.unpaired[v] = true
 		}
 	}
 }
 
-// describe lists the hidden channels for the startup log.
-func (h *hiddenChannels) describe() string {
+// hiddenSet is what's hidden when a request is judged.
+type hiddenSet struct {
+	numbers, idents, tunerChannels map[string]bool
+}
+
+func (h *hiddenChannels) snapshot() hiddenSet {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	idents := make([]string, 0, len(h.idents))
-	for id := range h.idents {
+	idents := make(map[string]bool, len(h.identValues)+len(h.tunarrIdents)+len(h.mapIdents))
+	for _, m := range []map[string]bool{h.identValues, h.tunarrIdents, h.mapIdents} {
+		for id := range m {
+			idents[id] = true
+		}
+	}
+	return hiddenSet{numbers: h.numbers, idents: idents, tunerChannels: h.tunerChannels}
+}
+
+// describe lists the hidden channels for the startup log.
+func (h *hiddenChannels) describe() string {
+	set := h.snapshot()
+	idents := make([]string, 0, len(set.idents))
+	for id := range set.idents {
 		idents = append(idents, id)
 	}
 	sort.Strings(idents)
+	h.mu.Lock()
 	state := "not in Plex's channel map yet"
 	if h.mapResolved {
 		state = "in Plex's channel map"
 	}
+	h.mu.Unlock()
 	return fmt.Sprintf("%s (%s; %s)", strings.Join(h.configured, ", "), strings.Join(idents, ", "), state)
 }
 
 // channelHidden reports whether a channel named in a request path is hidden.
 func (h *hiddenChannels) channelHidden(id string) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.idents[id] || h.numbers[id]
+	set := h.snapshot()
+	return set.idents[id] || set.numbers[id]
 }
 
 // entryHidden reports whether one entry (a JSON object or XML element named
-// name, with fields read by get) belongs to a hidden channel, learning the
-// channel's other names from it when it does. device is the tuner device a
-// response lists the channels of (/media/grabbers/devices/<device>/channels),
-// "" elsewhere. Only the fields that name a channel are compared, never
-// titles of programs.
-func (h *hiddenChannels) entryHidden(name, device string, get func(string) string) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+// name, with fields read by get) belongs to a hidden channel. Only the fields
+// that name a channel are compared, never titles of programs. A hidden
+// airing or lineup entry tells this response's Channel tags which Plex
+// channel ids and titles to drop.
+func (r *hideRun) entryHidden(name string, get func(string) string) bool {
+	s := r.set
 	switch name {
 	case "Media":
 		// An airing in the guide: the channel it airs on.
-		if h.idents[get("channelIdentifier")] || h.numbers[get("channelVcn")] {
-			addNonEmpty(h.idents, get("channelIdentifier"))
-			addNonEmpty(h.plexIDs, get("channelID"))
-			addNonEmpty(h.titles, get("channelTitle"))
+		if s.idents[get("channelIdentifier")] || s.numbers[get("channelVcn")] {
+			addNonEmpty(r.plexIDs, get("channelID"))
+			addNonEmpty(r.titles, get("channelTitle"))
 			return true
 		}
 	case "ChannelMapping":
 		// /livetv/dvrs: the DVR's mapping of tuner channels to guide channels.
-		if h.idents[get("channelKey")] || h.numbers[get("lineupIdentifier")] || h.numbers[get("deviceIdentifier")] {
-			addNonEmpty(h.idents, get("channelKey"))
-			return true
-		}
+		return s.idents[get("channelKey")] || s.numbers[get("lineupIdentifier")] || s.numbers[get("deviceIdentifier")]
 	case "DeviceChannel":
 		// /media/grabbers/devices/<device>/channels: the tuner's channels.
 		id := get("identifier")
-		return h.numbers[id] || (device != "" && h.tunerChannels[device+"\x00"+id])
+		return s.numbers[id] || (r.device != "" && s.tunerChannels[r.device+"\x00"+id])
 	case "Channel":
 		if get("filter") != "" || (get("tag") != "" && get("vcn") == "" && get("gridKey") == "") {
-			// A Channel tag on a program: id is Plex's internal channel id
-			// (learned from the airings), tag the channel title.
+			// A Channel tag on a program: id is Plex's internal channel id,
+			// tag the channel title, as the program's airings named them.
 			if id := get("id"); id != "" {
-				return h.plexIDs[id]
+				return r.plexIDs[id]
 			}
-			return h.titles[get("tag")]
+			return r.titles[get("tag")]
 		}
 		// A lineup channel (lineups/dvr/channels, epg lineupchannels).
-		if h.idents[get("id")] || h.idents[get("gridKey")] || h.idents[get("key")] || h.idents[get("identifier")] ||
-			h.numbers[get("vcn")] || h.numbers[get("channelVcn")] || h.numbers[get("identifier")] {
-			addNonEmpty(h.idents, get("id"), get("gridKey"), get("key"))
+		if s.idents[get("id")] || s.idents[get("gridKey")] || s.idents[get("key")] || s.idents[get("identifier")] ||
+			s.numbers[get("vcn")] || s.numbers[get("channelVcn")] || s.numbers[get("identifier")] {
 			if vcn := firstNonEmpty(get("vcn"), get("channelVcn")); vcn != "" {
 				if cs := get("callSign"); cs != "" {
-					h.titles[vcn+" "+cs] = true
+					r.titles[vcn+" "+cs] = true
 				}
 			}
 			return true
@@ -290,18 +298,16 @@ func (h *hiddenChannels) entryHidden(name, device string, get func(string) strin
 	return false
 }
 
-// leakIn reports a hidden channel's identifier, or its quoted title, found in
-// a filtered body, for the leak_suspect log line: a response shape the filter
-// doesn't know.
-func (h *hiddenChannels) leakIn(body []byte) string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	for id := range h.idents {
+// leakIn reports a hidden channel's identifier, or a quoted title of one this
+// response named, found in a filtered body, for the leak_suspect log line: a
+// response shape the filter doesn't know.
+func (r *hideRun) leakIn(body []byte) string {
+	for id := range r.set.idents {
 		if bytes.Contains(body, []byte(id)) {
 			return id
 		}
 	}
-	for title := range h.titles {
+	for title := range r.titles {
 		if bytes.Contains(body, []byte(`"`+title+`"`)) {
 			return title
 		}
@@ -311,15 +317,23 @@ func (h *hiddenChannels) leakIn(body []byte) string {
 
 // hideRun filters one response body.
 type hideRun struct {
-	h *hiddenChannels
+	set hiddenSet
 	// device is the tuner device whose channels the response lists, if any.
 	device string
+	// plexIDs and titles are the Plex channel ids and "<vcn> <callSign>"
+	// titles of the hidden channels this response named, for its Channel
+	// tags and the leak check.
+	plexIDs, titles map[string]bool
 	// removed counts every entry removed; rootRemoved the root container's
 	// direct children removed (for X-Plex-Container-Total-Size).
 	removed, rootRemoved int
 	// present counts hidden entries without removing them (owner debug).
 	countOnly bool
 	present   int
+}
+
+func (h *hiddenChannels) newRun(device string, countOnly bool) *hideRun {
+	return &hideRun{set: h.snapshot(), device: device, countOnly: countOnly, plexIDs: map[string]bool{}, titles: map[string]bool{}}
 }
 
 // itemFirst orders an object's keys so airings (Media) are judged before the
@@ -424,7 +438,7 @@ func (r *hideRun) filterChildrenJSON(obj map[string]any) int {
 // is a hidden channel's entry, or a program left with no airings, or a search
 // result left without its program.
 func (r *hideRun) dropJSON(name string, el map[string]any) bool {
-	if r.h.entryHidden(name, r.device, func(k string) string { return jsonString(el[k]) }) {
+	if r.entryHidden(name, func(k string) string { return jsonString(el[k]) }) {
 		r.count()
 		return true
 	}
@@ -613,7 +627,7 @@ func (r *hideRun) filterChildrenXML(n *xmlNode) int {
 
 func (r *hideRun) dropXML(e *xmlNode) bool {
 	name := e.start.Name.Local
-	if r.h.entryHidden(name, r.device, e.attr) {
+	if r.entryHidden(name, e.attr) {
 		r.count()
 		return true
 	}
@@ -675,6 +689,13 @@ func (p *Proxy) noteHideCaller(req *http.Request, originalToken string) {
 	hc := hideCtx{
 		callerToken:  strings.TrimSpace(originalToken),
 		viewAsFriend: viewAs && p.isOwnerToken(originalToken),
+	}
+	if hidePathCandidate(req.URL.EscapedPath()) && (hc.viewAsFriend || !p.isOwnerToken(originalToken)) {
+		// A 304 would let the client reuse a body it cached unfiltered (from
+		// before hiding, or as the owner's device): ask PMS for the whole
+		// response, so it's filtered.
+		req.Header.Del("If-None-Match")
+		req.Header.Del("If-Modified-Since")
 	}
 	*req = *req.WithContext(context.WithValue(req.Context(), hideCtxKey{}, hc))
 }
@@ -921,7 +942,7 @@ func (p *Proxy) hideLiveChannelEntries(resp *http.Response) error {
 
 	if class.seesHiddenChannels() {
 		// Debug: count what a shared user wouldn't see, change nothing.
-		run := &hideRun{h: p.hidden, device: tunerDevice(path), countOnly: true}
+		run := p.hidden.newRun(tunerDevice(path), true)
 		if isJSON {
 			_, _, _ = run.filterJSON(body)
 		} else if looksLikeXML(body) {
@@ -931,14 +952,14 @@ func (p *Proxy) hideLiveChannelEntries(resp *http.Response) error {
 		return restoreBody(resp, body, encoding)
 	}
 
+	if onPath && (p.hidden.needsMap() || tunerDevice(path) != "") {
+		// The tuner's channels are named by number only: an identifier's
+		// tuner channel comes from a current DVR channel map.
+		p.hidden.refreshMap(resp.Request.Context())
+	}
+	run := p.hidden.newRun(tunerDevice(path), false)
 	out := body
 	if onPath {
-		if p.hidden.needsMap() || tunerDevice(path) != "" {
-			// The tuner's channels are named by number only: an identifier's
-			// tuner channel comes from a current DVR channel map.
-			p.hidden.refreshMap(resp.Request.Context())
-		}
-		run := &hideRun{h: p.hidden, device: tunerDevice(path)}
 		var filtered []byte
 		var changed bool
 		var ferr error
@@ -962,7 +983,7 @@ func (p *Proxy) hideLiveChannelEntries(resp *http.Response) error {
 			p.logger.Printf("plexlabelproxy_hide: outcome=removed path=%s viewer=%s removed=%d token_fp=%s", path, class, run.removed, tokenFingerprint(hc.callerToken))
 		}
 	}
-	if leak := p.hidden.leakIn(out); leak != "" {
+	if leak := run.leakIn(out); leak != "" {
 		p.recordHideOutcome("leak_suspect")
 		p.logger.Printf("plexlabelproxy_hide: outcome=leak_suspect path=%s viewer=%s match=%q", path, class, leak)
 	}

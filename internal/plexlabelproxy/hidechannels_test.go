@@ -65,6 +65,7 @@ type hideFixture struct {
 
 type pmsCall struct {
 	path, viewAs string
+	conditional  bool
 }
 
 func newHideFixture(t *testing.T) *hideFixture {
@@ -103,7 +104,11 @@ func newHideFixture(t *testing.T) *hideFixture {
 
 func (f *hideFixture) servePMS(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
-	f.calls = append(f.calls, pmsCall{path: r.URL.Path, viewAs: r.Header.Get(ViewAsHeader)})
+	f.calls = append(f.calls, pmsCall{
+		path:        r.URL.Path,
+		viewAs:      r.Header.Get(ViewAsHeader),
+		conditional: r.Header.Get("If-None-Match") != "" || r.Header.Get("If-Modified-Since") != "",
+	})
 	dvrsXML := f.dvrsXML
 	f.mu.Unlock()
 	if r.URL.Path == "/identity" {
@@ -117,6 +122,10 @@ func (f *hideFixture) servePMS(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/livetv/dvrs" && f.dvrsDown.Load() {
 		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	if r.Header.Get("If-None-Match") == `"etag-1"` {
+		w.WriteHeader(http.StatusNotModified)
 		return
 	}
 	asJSON := strings.Contains(r.Header.Get("Accept"), "json")
@@ -874,6 +883,66 @@ func TestHideLiveChannel_HidesTheTunerChannelOfAGuideIdentifier(t *testing.T) {
 			t.Errorf("tuning the hidden channel: status %d", rec.Code)
 		}
 	})
+}
+
+func TestHideLiveChannel_FollowsANumberPlexMovedToAnotherChannel(t *testing.T) {
+	f := newHideFixture(t)
+	setMap := func(mappings string) {
+		f.mu.Lock()
+		f.dvrsXML = `<MediaContainer size="1"><Dvr key="4"><Device key="1">` + mappings + `</Device></Dvr></MediaContainer>`
+		f.mu.Unlock()
+	}
+	setMap(`<ChannelMapping channelKey="example-a" deviceIdentifier="99" enabled="1" lineupIdentifier="99"/>`)
+	p := f.proxy(t, nil)
+	tune := func(channel string) int {
+		return hideServe(p, http.MethodPost, "/livetv/dvrs/4/channels/"+channel+"/tune", "friend-token", "xml").Code
+	}
+	if code := tune("example-a"); code != http.StatusNotFound {
+		t.Fatalf("tuning 99 (example-a): status %d", code)
+	}
+	// Plex now has 99 on example-b, and example-a is channel 98.
+	setMap(`<ChannelMapping channelKey="example-b" deviceIdentifier="99" enabled="1" lineupIdentifier="99"/>
+<ChannelMapping channelKey="example-a" deviceIdentifier="98" enabled="1" lineupIdentifier="98"/>`)
+	p.hidden.mu.Lock()
+	p.hidden.mapTriedAt = time.Now().Add(-2 * hiddenMapMaxAge)
+	p.hidden.mu.Unlock()
+	if code := tune("example-b"); code != http.StatusNotFound {
+		t.Errorf("tuning 99 (example-b): status %d", code)
+	}
+	if code := tune("example-a"); code != http.StatusOK {
+		t.Errorf("tuning 98 (example-a, 99's old identifier): status %d", code)
+	}
+}
+
+func TestHideLiveChannel_SharedViewIsNeverAnswered304(t *testing.T) {
+	f := newHideFixture(t)
+	p := f.proxy(t, nil)
+	grid := hideProvider + "/grid"
+	conditional := []string{"If-None-Match", `"etag-1"`, "If-Modified-Since", "Mon, 01 Jan 2024 00:00:00 GMT"}
+	lastConditional := func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.calls[len(f.calls)-1].conditional
+	}
+	// A client that cached the guide unfiltered gets the filtered guide.
+	rec := hideServe(p, http.MethodGet, grid, "friend-token", "json", conditional...)
+	if rec.Code != http.StatusOK || lastConditional() {
+		t.Fatalf("shared user: status %d, validators forwarded=%v", rec.Code, lastConditional())
+	}
+	if body := hideBody(t, rec); bytes.Contains(body, []byte(hiddenIdent)) {
+		t.Errorf("shared user's guide lists the hidden channel:\n%s", body)
+	}
+	// So does the owner's preview.
+	if rec := hideServe(p, http.MethodGet, grid, "owner-token", "json", append(conditional, ViewAsHeader, "friend")...); rec.Code != http.StatusOK || lastConditional() {
+		t.Errorf("owner's preview: status %d, validators forwarded=%v", rec.Code, lastConditional())
+	}
+	// The owner keeps them, and so does anyone off the Live TV paths.
+	if rec := hideServe(p, http.MethodGet, grid, "owner-token", "json", conditional...); rec.Code != http.StatusNotModified || !lastConditional() {
+		t.Errorf("owner: status %d, validators forwarded=%v", rec.Code, lastConditional())
+	}
+	if rec := hideServe(p, http.MethodGet, "/library/sections", "friend-token", "json", conditional...); rec.Code != http.StatusNotModified || !lastConditional() {
+		t.Errorf("library: status %d, validators forwarded=%v", rec.Code, lastConditional())
+	}
 }
 
 func TestHideLiveChannel_RefusesToTuneIt(t *testing.T) {

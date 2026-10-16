@@ -476,11 +476,13 @@ iptv-tunerr plex-label-proxy -elevate-live-tv -hide-live-channel=99 ...
   (`Media`; a program left with none goes too), a program's `Channel` tags,
   search results, the DVR's `ChannelMapping` and the tuner's `DeviceChannel`.
   `size`, `totalSize` and `X-Plex-Container-Total-Size` are lowered to match,
-  and a changed response gets `Cache-Control: private, no-store`. A tune or any
-  other `/livetv/dvrs/<dvr>/channels/<channel>/...` request for it gets 404 and
-  never reaches Plex, including one nested in a stream start (a transcode's
-  `path`, a play queue's `uri` or `path`, in the query or the body). That's audited as `outcome=deny_hidden_channel` and isn't
-  counted toward a block.
+  and a changed response gets `Cache-Control: private, no-store`. Their
+  requests on these paths lose `If-None-Match` and `If-Modified-Since`, so a
+  304 can't bring back a response cached before hiding. A tune or any other
+  `/livetv/dvrs/<dvr>/channels/<channel>/...` request for it gets 404 and never
+  reaches Plex, including one nested in a stream start (a transcode's `path`,
+  a play queue's `uri` or `path`, in the query or the body). That's audited as
+  `outcome=deny_hidden_channel` and isn't counted toward a block.
 - **Checking it** without a shared user's token: send the owner token with
   `X-Iptvtunerr-View-As: friend` to get the shared view (the header is ignored
   for any other token and never passed to Plex):
