@@ -60,6 +60,30 @@ Newest first.
 - **Upstream:** not sent / issue or PR link.
 -->
 
+### A Plex hiccup no longer locks friends out (2026-10-16)
+
+- **What it fixes:** while Plex restarted, a shared user's app and the owner's own devices were refused Live TV, then
+  their addresses were blocked for 30 minutes (seen 2026-10-16: three addresses blocked within a minute of a Plex
+  restart). Any Plex request slower than 5 s, during a library scan for example, could do the same. Friends saw it as
+  Live TV failing and dropping.
+- **Cause:** `PlexTokenAuthorizer.check` returned "not authorized" for every failure to ask Plex (connection refused,
+  timeout, 5xx), and that answer was cached for 5 minutes. Each refusal then counted as a bad elevation attempt:
+  a 2-minute cooldown, and a 30-minute block after 5 of them. Separately, `canElevate` and `blockBypassAllowed`
+  called the authorizer twice per check (the plain then the detailed form), so every check was logged as a cache
+  hit, and an uncached failure would have asked Plex twice.
+- **Fix:**
+  - `authorizer.go`: `check` reports whether Plex gave a verdict. Only 2xx (allowed) and 401/403 (refused) are
+    cached. Otherwise the decision is `Unavailable`: a token Plex accepted in the last 24 hours stays allowed
+    (rechecked every 30 s), and any other token is refused without caching.
+  - `proxy.go`: an `Unavailable` refusal is logged as `deny_auth_unavailable` and isn't a bad attempt (no cooldown,
+    no block); an `Unavailable` allow is logged as `allow_auth_unavailable`. The summary line gains
+    `auth_unavailable=`. The authorizer is asked once per check (`authorize`).
+  - **Docs:** the runbook's audit outcomes.
+- **Test:** `authorizer_test.go`: a 503 isn't cached; a 401 is; a recently allowed token survives Plex being
+  unreachable, but not past 24 hours or after a 401; and through the proxy, more Plex outages than the block threshold
+  neither block the source nor start a cooldown, and the token is elevated as soon as Plex answers.
+- **Upstream:** not sent.
+
 ### Listen on a private Unix socket (2026-10-14)
 
 - **What it fixes:** the proxy could only listen on TCP, and it trusts `X-Forwarded-For` from any loopback peer. On a

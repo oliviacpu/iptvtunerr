@@ -209,6 +209,7 @@ type auditStats struct {
 	authCacheHit     int
 	authCacheMiss    int
 	authCooldownDeny int
+	authUnavailable  int
 	blockedSources   int
 	blockedRequests  int
 	bySource         map[string]int
@@ -392,13 +393,20 @@ func (p *Proxy) canElevate(req *http.Request, originalToken string) bool {
 		p.recordBadElevationAttempt(req, token, "auth_cooldown")
 		return false
 	}
-	decision := AuthorizationDecision{Allowed: p.authorizer.AllowPlexToken(req.Context(), token)}
-	if detailed, ok := p.authorizer.(DetailedTokenAuthorizer); ok {
-		decision = detailed.AllowPlexTokenDetailed(req.Context(), token)
-	}
+	decision := p.authorize(req, token)
 	p.recordAuthDecision(decision.CacheHit)
 	if decision.Allowed {
+		if decision.Unavailable {
+			p.auditElevation(req, "allow_auth_unavailable", token, "PMS could not check the token; it accepted it recently, so it stays allowed")
+		}
 		return true
+	}
+	if decision.Unavailable {
+		// PMS restarting, busy or unreachable is not the client's fault:
+		// refuse this elevation, but don't start a cooldown or count it
+		// toward a source block.
+		p.auditElevation(req, "deny_auth_unavailable", token, "PMS could not check the token; not counted as a bad attempt")
+		return false
 	}
 	p.auditElevation(req, "deny_unauthorized_token", token, fmt.Sprintf("inbound Plex token is not authorized for this server auth_cache_hit=%v", decision.CacheHit))
 	p.recordBadElevationAttempt(req, token, "unauthorized_token")
@@ -1099,12 +1107,19 @@ func (p *Proxy) blockBypassAllowed(req *http.Request, token string) bool {
 	if p.badAuthCooldownActive(req, token) {
 		return false
 	}
-	decision := AuthorizationDecision{Allowed: p.authorizer.AllowPlexToken(req.Context(), token)}
-	if detailed, ok := p.authorizer.(DetailedTokenAuthorizer); ok {
-		decision = detailed.AllowPlexTokenDetailed(req.Context(), token)
-	}
+	decision := p.authorize(req, token)
 	p.recordAuthDecision(decision.CacheHit)
 	return decision.Allowed
+}
+
+// authorize asks the authorizer once: the detailed form when it has one, so a
+// cache miss isn't followed by a second lookup that reports a cache hit (or,
+// when PMS can't answer, a second PMS request).
+func (p *Proxy) authorize(req *http.Request, token string) AuthorizationDecision {
+	if detailed, ok := p.authorizer.(DetailedTokenAuthorizer); ok {
+		return detailed.AllowPlexTokenDetailed(req.Context(), token)
+	}
+	return AuthorizationDecision{Allowed: p.authorizer.AllowPlexToken(req.Context(), token)}
 }
 
 func abuseKey(req *http.Request) string {
@@ -1374,6 +1389,8 @@ func (p *Proxy) recordAuditOutcome(outcome, source string) {
 		p.stats.denyUnauthorized++
 	case "deny_auth_cooldown":
 		p.stats.authCooldownDeny++
+	case "deny_auth_unavailable", "allow_auth_unavailable":
+		p.stats.authUnavailable++
 	case "bad_actor_blocked":
 		p.stats.blockedSources++
 	case "blocked_bad_actor":
@@ -1401,12 +1418,13 @@ func (p *Proxy) emitAuditSummary() {
 	p.statsMu.Unlock()
 	top := topAuditSources(stats.bySource, 5)
 	p.logger.Printf(
-		"plexlabelproxy_audit_summary: since=%s elevated=%d deny_missing=%d deny_unauthorized=%d deny_auth_cooldown=%d auth_cache_hit=%d auth_cache_miss=%d blocked_sources=%d blocked_requests=%d top_sources=%q",
+		"plexlabelproxy_audit_summary: since=%s elevated=%d deny_missing=%d deny_unauthorized=%d deny_auth_cooldown=%d auth_unavailable=%d auth_cache_hit=%d auth_cache_miss=%d blocked_sources=%d blocked_requests=%d top_sources=%q",
 		stats.since.Format(time.RFC3339),
 		stats.elevated,
 		stats.denyMissing,
 		stats.denyUnauthorized,
 		stats.authCooldownDeny,
+		stats.authUnavailable,
 		stats.authCacheHit,
 		stats.authCacheMiss,
 		stats.blockedSources,

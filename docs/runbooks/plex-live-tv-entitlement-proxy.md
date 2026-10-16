@@ -188,6 +188,13 @@ elevation decision that matters operationally:
   access this Plex server and was not elevated
 - `outcome=deny_auth_cooldown` means the same source/token pair was recently
   denied and the proxy rejected it without asking PMS to validate it again
+- `outcome=deny_auth_unavailable` means PMS could not check the token (it was
+  restarting, busy past the 5 s timeout, unreachable, or answered with an error
+  other than 401/403). The request is not elevated, but this does not start a
+  cooldown or count toward a block, and the refusal is not cached
+- `outcome=allow_auth_unavailable` means PMS could not check the token, but it
+  accepted the same token within the last 24 hours, so the request is still
+  elevated. PMS is asked again after 30 seconds
 - `outcome=bad_actor_blocked` means a source crossed the repeated-denial
   threshold and is now temporarily blocked
 - `outcome=blocked_bad_actor` means a request was rejected by that temporary
@@ -226,7 +233,8 @@ Set `IPTV_TUNERR_PROXY_BAD_AUTH_COOLDOWN` or
 `-1s`, to disable that feature.
 
 Every audit summary interval the proxy emits a `plexlabelproxy_audit_summary:`
-line with elevated, denied, cooldown, cache-hit/cache-miss, and block counters.
+line with elevated, denied, cooldown, auth-unavailable, cache-hit/cache-miss,
+and block counters.
 
 Useful checks:
 
