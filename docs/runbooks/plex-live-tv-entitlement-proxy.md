@@ -381,6 +381,52 @@ These flags narrow elevation further:
   session or client identifier and source address. Neither is secret, so use
   this flag wherever other users can reach the proxy's listener.
 
+### Who is watching Live TV (`-live-viewers`)
+
+The proxy tunes a shared user's Live TV with the owner token, so Plex records
+the session under the owner: Plex Web's dashboard, Tracearr and Tautulli all
+show every shared user's Live TV as the owner's. With `-live-viewers`, the
+proxy remembers which Plex account is behind each client that starts Live TV
+(a tune, transcode start or play queue it elevated and PMS accepted), and lists
+them:
+
+```bash
+curl -s -H "X-Plex-Token: $OWNER_TOKEN" http://127.0.0.1:33240/iptvtunerr/live-viewers
+```
+
+```json
+{"machineIdentifier":"<PMS machineIdentifier>","viewers":[{"clientIdentifier":"abc123","plexAccountId":"6414250","username":"friend","lastSeen":"2026-10-16T07:00:00Z"}]}
+```
+
+- `machineIdentifier` is the Plex server the list is for (empty until the share
+  list was first fetched): a tool watching several servers applies the list to
+  that one only.
+- Match `clientIdentifier` with a Plex session's `Player.machineIdentifier`.
+  `plexAccountId` is the shared user's plex.tv account id, the `User.id` Plex
+  would have shown for their own session.
+- The accounts come from plex.tv's share list for this server
+  (`/api/servers/<machineIdentifier>/shared_servers`, fetched with the owner
+  token, at most every 10 minutes, or after a minute for a newly seen unknown
+  token). The list carries each shared user's token for this server; the proxy
+  keeps only their fingerprints.
+- A client whose token isn't a shared user's (the owner's own devices) is listed
+  with an empty `plexAccountId` and `username`.
+- A Live TV start made with the owner token itself forgets that client, so an
+  app a shared user signed out of isn't still listed as theirs.
+- Clients are forgotten 12 hours after their last Live TV start. A client
+  identifier longer than 128 characters or with control characters isn't kept.
+- Without the owner token the path answers 404 and isn't passed to PMS. Without
+  the flag it's passed to PMS like any other path.
+- To let a monitoring tool read the list without the owner token, set
+  `IPTV_TUNERR_PROXY_LIVE_VIEWERS_KEY` (environment only, at least 24
+  characters, for example `openssl rand -hex 24`) and have the tool send
+  `Authorization: Bearer <key>`. The key grants nothing else; sent as a Plex
+  token it is refused like any unknown token.
+- Each newly seen client is logged once, after the share list is refreshed if
+  its account isn't known yet (if plex.tv fails, at its next Live TV start):
+  `plexlabelproxy_viewer:
+  outcome=live_tv_client client="<first 8 characters>" account="<username>"`.
+
 `-owner-token` defaults to `IPTV_TUNERR_PMS_OWNER_TOKEN`,
 `PLEX_OWNER_TOKEN`, and then `-token` / `IPTV_TUNERR_PMS_TOKEN` /
 `PLEX_TOKEN`. Prefer env files over command-line token flags so the owner token

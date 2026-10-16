@@ -60,6 +60,45 @@ Newest first.
 - **Upstream:** not sent / issue or PR link.
 -->
 
+### Who is watching Live TV: `-live-viewers` (2026-10-16)
+
+- **What it fixes:** Plex records a shared user's Live TV under the owner, because the proxy tuned it with the owner
+  token. Tracearr showed a friend's Live TV as the owner's, or nothing to tell them apart.
+- **Cause:** nothing outside the proxy knows which account was behind an elevated tune.
+- **Fix:**
+  - `liveviewers.go`: with `-live-viewers` (`Config.LiveViewers`), each elevated Live TV start (tune, transcode
+    start, play queue) that PMS accepts (2xx) records its client identifier against the token's fingerprint (noted on
+    the request, recorded in `modifyResponse` once PMS has answered). plex.tv's share list for the
+    server (`/api/servers/<machineIdentifier>/shared_servers`, owner token) gives each shared user's token for this
+    server, so its fingerprints name the accounts. `GET /iptvtunerr/live-viewers` with the owner token lists
+    `clientIdentifier`, `plexAccountId`, `username`, `lastSeen`; anything else gets 404 and never reaches PMS. Off,
+    the path goes to PMS as before.
+  - `IPTV_TUNERR_PROXY_LIVE_VIEWERS_KEY` (`Config.LiveViewersKey`, 24+ characters, environment only) also opens the
+    list to `Authorization: Bearer <key>`, so Tracearr can read it without holding the owner token.
+  - The share list is fetched when the list is asked for: at most every 10 minutes, or after a minute when a newly
+    seen token isn't in it. Clients are kept 12 hours after their last Live TV start, 1000 at most. Only token
+    fingerprints are kept. A client identifier is kept only if it's printable ASCII and at most 128 characters
+    (Plex's are 20-40); the client supplies it.
+  - A newly seen client is logged once, after the share list is refreshed if its token isn't known yet (in the
+    background, not on the response path), so the log names the account. Concurrent refreshes share one fetch and
+    wait for it. An account still unknown is only written off as an owner device once a share list fetched after the
+    client was first seen lacks it; until then the lookup is retried (3 tries, a minute apart), and if plex.tv keeps
+    failing, the client's next Live TV start tries again. At most 16 such lookups run at once; past that, the
+    client's line waits for its next start.
+  - The response carries the server's `machineIdentifier` (from the share list fetch), so a tool watching several
+    servers applies it to the right one. A start with the owner token itself forgets that client's earlier mapping.
+  - `cmd_plex_label_proxy.go`: the flag. **Docs:** the runbook's "Who is watching Live TV".
+- **Test:** `liveviewers_test.go`: a friend's tune names account 42 and the owner's device stays unnamed, with no
+  token in the response or logs; browsing the guide records nothing; without the owner token it's a 404 that neither
+  reaches PMS nor fetches the share list; off by default the path is proxied; the share list refresh rules and the
+  12-hour expiry; the key opens the list but a wrong, short or misplaced key doesn't, and it elevates nothing; a
+  start PMS refused or never got isn't recorded; an identifier with a control character or over 128 characters isn't
+  kept, and a kept one is quoted in the log; the new-viewer log names the account even before anyone read the list;
+  the response names the server; an owner-token start clears a stale mapping; concurrent refreshes share one fetch;
+  a plex.tv failure delays the viewer line to the next start instead of writing it as unknown; a friend shared after
+  the last fetch is named on the retry, not written off as unknown; lookups are bounded.
+- **Upstream:** not sent.
+
 ### A Plex hiccup no longer locks friends out (2026-10-16)
 
 - **What it fixes:** while Plex restarted, a shared user's app and the owner's own devices were refused Live TV, then

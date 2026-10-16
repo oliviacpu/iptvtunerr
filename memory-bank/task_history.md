@@ -544,3 +544,13 @@
 - Reconfirmed the 24,908-channel smoketest timeout regression preserves untested rows. Updated the active bug-council backlog count for the new filesystem boundary test.
 - Verification: `./scripts/release-readiness.sh`, focused config/sports/indexer tests, the 24,908-channel regression, WebUI `npm run build`, shell syntax checks, release-note preview/validation, and `git diff --check` passed. `npm ci` reported zero vulnerabilities.
 - Prepared the changes for patch release `v0.1.90`; release publication follows the tagged commit.
+
+## 2026-10-16 - Fork: a Plex hiccup no longer locks friends out (oliviacpu PR #2, release oliviacpu-2026.10.16)
+
+- `PlexTokenAuthorizer.check` treated any failure to ask PMS (connection refused, timeout, 5xx) as "not authorized" and cached it for 5 minutes; each refusal counted as a bad elevation attempt, so a Plex restart blocked three valid addresses for 30 minutes on 2026-10-16. Only 2xx and 401/403 are verdicts now; when PMS can't answer, a token it accepted in the last 24 hours stays allowed and others are refused without caching or counting toward a block (`deny_auth_unavailable`, `allow_auth_unavailable`). The authorizer is also asked once per check instead of twice.
+- Verification: new `authorizer_test.go`; `go vet` and the `plexlabelproxy` suite passed locally (except the macOS-only socket-path test, which also fails on `main`) and on Linux in the tag build.
+
+## 2026-10-16 - Fork: `-live-viewers` names who is behind each Live TV client (oliviacpu PR #3)
+
+- Plex records a shared user's elevated Live TV under the owner. With `-live-viewers`, each elevated Live TV start PMS accepts records its client identifier against the token fingerprint; plex.tv's share list for the server names the account. `GET /iptvtunerr/live-viewers` (owner token, or `IPTV_TUNERR_PROXY_LIVE_VIEWERS_KEY` as a bearer key) lists them for monitoring tools; the Tracearr fork uses it.
+- Verification: new `liveviewers_test.go` (attribution, auth and 404s, off by default, refresh rules, expiry, key handling, refused starts not recorded, quoted log identifiers); `go vet`, the `plexlabelproxy` suite (same macOS exception) and `go build ./cmd/iptv-tunerr/` passed.

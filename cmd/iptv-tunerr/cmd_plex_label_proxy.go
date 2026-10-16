@@ -41,6 +41,7 @@ func plexLabelProxyCommands() []commandSpec {
 	noElevateSubscriptions := cmd.Bool("no-elevate-subscriptions", false, "With -elevate-live-tv: never use the owner token for DVR subscription (recording) requests")
 	noElevateRootIdentity := cmd.Bool("no-elevate-root-identity", false, "With -elevate-live-tv: never use the owner token for / and /identity (the owner's view includes account details)")
 	noSessionTokenRecovery := cmd.Bool("no-session-token-recovery", false, "With -elevate-live-tv: never elevate a request that carries no Plex token, even if it matches a tracked session")
+	liveViewers := cmd.Bool("live-viewers", false, "With -elevate-live-tv: remember which Plex account is behind each client that starts Live TV, and list them at "+plexlabelproxy.LiveViewersPath+" for callers with the owner token or IPTV_TUNERR_PROXY_LIVE_VIEWERS_KEY (Plex records those sessions under the owner)")
 	abuseThreshold := cmd.Int("abuse-block-threshold", envInt("IPTV_TUNERR_PROXY_ABUSE_THRESHOLD", 0), "Failed Live TV elevation attempts per source before temporary block (default 5; env IPTV_TUNERR_PROXY_ABUSE_THRESHOLD)")
 	abuseWindow := cmd.Duration("abuse-block-window", envDuration("IPTV_TUNERR_PROXY_ABUSE_WINDOW", 0), "Rolling window for failed elevation attempts (default 5m; env IPTV_TUNERR_PROXY_ABUSE_WINDOW)")
 	abuseDuration := cmd.Duration("abuse-block-duration", envDuration("IPTV_TUNERR_PROXY_ABUSE_BLOCK_DURATION", 0), "Temporary block duration after threshold (default 30m; env IPTV_TUNERR_PROXY_ABUSE_BLOCK_DURATION)")
@@ -56,13 +57,13 @@ func plexLabelProxyCommands() []commandSpec {
 			FlagSet: cmd,
 			Run: func(_ *config.Config, args []string) {
 				_ = cmd.Parse(args)
-				runPlexLabelProxy(*listen, *upstream, *plexURL, *token, *ownerToken, *stripPrefix, *refreshSec, *spoofIdentity, *elevateAll, *elevateLiveTV, *elevateDiscoveryOnly, *userHeader, *neutralizeOwnerHistory, *noElevateSubscriptions, *noElevateRootIdentity, *noSessionTokenRecovery, *socketMode, *abuseThreshold, *abuseWindow, *abuseDuration, *abuseStateFile, *badAuthCooldown, *auditSummaryInterval)
+				runPlexLabelProxy(*listen, *upstream, *plexURL, *token, *ownerToken, *stripPrefix, *refreshSec, *spoofIdentity, *elevateAll, *elevateLiveTV, *elevateDiscoveryOnly, *userHeader, *neutralizeOwnerHistory, *noElevateSubscriptions, *noElevateRootIdentity, *noSessionTokenRecovery, *liveViewers, *socketMode, *abuseThreshold, *abuseWindow, *abuseDuration, *abuseStateFile, *badAuthCooldown, *auditSummaryInterval)
 			},
 		},
 	}
 }
 
-func runPlexLabelProxy(listen, upstream, plexURL, token, ownerToken, stripPrefix string, refreshSec int, spoofIdentity, elevateAll, elevateLiveTV, elevateDiscoveryOnly, userHeader, neutralizeOwnerHistory, noElevateSubscriptions, noElevateRootIdentity, noSessionTokenRecovery bool, socketMode string, abuseThreshold int, abuseWindow, abuseDuration time.Duration, abuseStateFile string, badAuthCooldown, auditSummaryInterval time.Duration) {
+func runPlexLabelProxy(listen, upstream, plexURL, token, ownerToken, stripPrefix string, refreshSec int, spoofIdentity, elevateAll, elevateLiveTV, elevateDiscoveryOnly, userHeader, neutralizeOwnerHistory, noElevateSubscriptions, noElevateRootIdentity, noSessionTokenRecovery, liveViewers bool, socketMode string, abuseThreshold int, abuseWindow, abuseDuration time.Duration, abuseStateFile string, badAuthCooldown, auditSummaryInterval time.Duration) {
 	// Always consult env/aliases so a flag for one field doesn't suppress
 	// fallback resolution for the other.
 	resolved, resolvedToken := resolvePlexAccess(plexURL, token)
@@ -127,16 +128,19 @@ func runPlexLabelProxy(listen, upstream, plexURL, token, ownerToken, stripPrefix
 		NoElevateSubscriptions: noElevateSubscriptions,
 		NoElevateRootIdentity:  noElevateRootIdentity,
 		NoSessionTokenRecovery: noSessionTokenRecovery,
-		SocketMode:             os.FileMode(mode),
-		Labels:                 cache,
-		SpoofIdentity:          spoofIdentity,
-		TokenAuthorizer:        tokenAuthorizer,
-		AbuseBlockThreshold:    abuseThreshold,
-		AbuseBlockWindow:       abuseWindow,
-		AbuseBlockDuration:     abuseDuration,
-		AbuseBlockStateFile:    abuseStateFile,
-		BadAuthCooldown:        badAuthCooldown,
-		AuditSummaryInterval:   auditSummaryInterval,
+		LiveViewers:            liveViewers,
+		// read from the environment only, so it never shows in process listings
+		LiveViewersKey:       strings.TrimSpace(os.Getenv("IPTV_TUNERR_PROXY_LIVE_VIEWERS_KEY")),
+		SocketMode:           os.FileMode(mode),
+		Labels:               cache,
+		SpoofIdentity:        spoofIdentity,
+		TokenAuthorizer:      tokenAuthorizer,
+		AbuseBlockThreshold:  abuseThreshold,
+		AbuseBlockWindow:     abuseWindow,
+		AbuseBlockDuration:   abuseDuration,
+		AbuseBlockStateFile:  abuseStateFile,
+		BadAuthCooldown:      badAuthCooldown,
+		AuditSummaryInterval: auditSummaryInterval,
 	})
 	if err != nil {
 		log.Printf("plex-label-proxy: %v", err)
@@ -146,8 +150,8 @@ func runPlexLabelProxy(listen, upstream, plexURL, token, ownerToken, stripPrefix
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	log.Printf("plex-label-proxy: starting on %s -> %s (elevate_all=%v elevate_live_tv=%v discovery_only=%v neutralize_owner=%v no_elevate_subscriptions=%v no_elevate_root_identity=%v no_session_token_recovery=%v spoof_identity=%v strip_prefix=%q)",
-		listen, upstream, elevateAll, elevateLiveTV, elevateDiscoveryOnly, neutralizeOwnerHistory, noElevateSubscriptions, noElevateRootIdentity, noSessionTokenRecovery, spoofIdentity, stripPrefix)
+	log.Printf("plex-label-proxy: starting on %s -> %s (elevate_all=%v elevate_live_tv=%v discovery_only=%v neutralize_owner=%v no_elevate_subscriptions=%v no_elevate_root_identity=%v no_session_token_recovery=%v live_viewers=%v spoof_identity=%v strip_prefix=%q)",
+		listen, upstream, elevateAll, elevateLiveTV, elevateDiscoveryOnly, neutralizeOwnerHistory, noElevateSubscriptions, noElevateRootIdentity, noSessionTokenRecovery, liveViewers, spoofIdentity, stripPrefix)
 	if err := proxy.ListenAndServe(ctx, listen); err != nil {
 		log.Printf("plex-label-proxy: server exited: %v", err)
 		os.Exit(1)

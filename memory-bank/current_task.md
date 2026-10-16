@@ -1,11 +1,16 @@
-# Current task: API-Sports Sports Automation release closeout
+# Current task (oliviacpu fork): `-live-viewers`
 
-- **Goal:** adapt the API-Sports integration from M3U Web Picker to Tunerr's IPTV tuner architecture. Use canonical MLB/NFL/NCAA Football schedules to reconcile provider channel and merged XMLTV event rows, generate temporary event channels, and expose automation through the tuner API and operator WebUI.
-- **Story IDs:** SPH-001 through SPH-008 in [work_breakdown.md](work_breakdown.md).
-- **Scope:** fixed API-Sports dataset adapters; server-only key; bounded persistent schedule cache and refresh status; operator-managed enabled datasets/team filters and time window; matching against Tunerr's actual live catalog and merged XMLTV; separate generated event M3U/guide that streams only via Tunerr's existing `/stream/{channel_id}`; operator-gated configuration/status/event/refresh APIs; authenticated WebUI automation management; docs, README TOC, release note, and safe release-channel dispatch.
-- **Assumptions:** supported canonical datasets are MLB, NFL, and NCAA Football as in the reference. API credentials remain environment-only (`IPTV_TUNERR_API_SPORTS_KEY`). Generated event channels are published in separate `/sports/live.m3u` and `/sports/guide.xml` outputs so they cannot replace or collide with the user's saved Tunerr lineup. Unsupported sports continue to use the existing provider/EPG paths and do not trigger API-Sports requests. Feed matches require both teams and a plausible time window; ambiguous matches remain unmatched.
-- **Out of scope:** separate live-score dashboard, third-party playback URLs, new stream providers, standings/odds, Snap publishing, and Docker Hub publishing.
-- **Success criteria:** a configured key fetches only required canonical datasets/dates through fixed hosts; cached/stale schedules survive upstream failures; event matching chooses only channels in the current Tunerr lineup with guide evidence; generated channel identity is stable independently of its reusable display number; API, M3U/guide functionality, and WebUI expose the complete flow without revealing credentials or raw provider URLs.
-- **Verification:** use `memory-bank/commands.yml` and `scripts/release-readiness.sh`, including repo verify, required tests, build, and smoke checks. Confirm the release dispatcher skips Snap and explicitly disables Docker Hub while GHCR retains `latest` and version tags; scan release-facing text for local identity leaks.
-- **Assumptions:** user explicitly authorized committing and pushing the full dirty worktree and cutting the release; normal fast-forward only. Keep the existing Snap and Docker Hub pause active, while other configured release channels remain enabled.
-- **Current status:** feature implementation and user-facing integration are complete across backend, generated outputs, operator API, WebUI, README, docs, and release wiring. The full `scripts/release-readiness.sh` gate passed, including council, tests, build, and smoke; the WebUI production build passed with its existing large-bundle warning. Immutable tag `v0.1.88` is published. GitHub Release, GHCR, AUR, COPR, Chocolatey, and Winget completed; Snap and Docker Hub were intentionally skipped. Launchpad's exact Jammy and Noble source packages are published, and both builds report `Successfully built`; neither exact amd64 binary is published yet. PPA run [36893644836](https://github.com/snapetech/iptvtunerr/actions/runs/36893644836) failed before these binaries finished processing. Poller fixes for transient API failures, delayed source visibility, and request timeouts are on `main`; continue monitoring the existing build records without re-uploading or moving the release tag. Last checked 2026-10-01 18:00 UTC.
+This fork only uses `plex-label-proxy` in Live TV elevation mode (see `FORK.md`). The upstream task this file
+described before (API-Sports release closeout) belongs to upstream and isn't worked on here.
+
+- **Goal:** monitoring tools can tell which shared user is behind a Live TV session the proxy elevated (Plex records
+  it under the owner).
+- **Scope:** one PR (#3): `-live-viewers` and `GET /iptvtunerr/live-viewers` (owner token or
+  `IPTV_TUNERR_PROXY_LIVE_VIEWERS_KEY`), naming the Plex account behind each Live TV client whose start PMS accepted
+  (`liveviewers.go`). Tracearr reads the list from its own fork; that's outside this repository.
+- **Out of scope:** upstream features, other `iptv-tunerr` commands, sending this upstream.
+- **Success criteria:** `liveviewers_test.go` passes; in production, a friend's Live TV client appears in the list
+  under their account.
+- **Verification:** `GOFLAGS=-mod=vendor go test ./internal/plexlabelproxy/` (the Unix socket test fails on macOS on
+  `main` too: its temp path is over macOS's 104-byte limit); the tag build runs the suite on Linux.
+- **Current status:** implemented and tested, in review. Next: merge, tag, deploy with `-live-viewers` and the key.
