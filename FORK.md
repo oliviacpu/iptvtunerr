@@ -73,7 +73,8 @@ Newest first.
     `Channel`s, guide and hub airings (`Media`; a program left with none goes), `Channel` tags, `SearchResult`s,
     `ChannelMapping`s and `DeviceChannel`s, with `size`, `totalSize` and `X-Plex-Container-Total-Size` lowered,
     `X-Plex-Content-*-Length` dropped and `Cache-Control: private, no-store`. Gzip is kept. A request naming a hidden
-    channel under `/livetv/dvrs/<dvr>/channels/` gets 404 without reaching PMS (`deny_hidden_channel`, not a bad
+    channel under `/livetv/dvrs/<dvr>/channels/`, in its path, any query value or a play queue's body (the nested
+    targets `IsLiveTVStreamRequest` elevates), gets 404 without reaching PMS (`deny_hidden_channel`, not a bad
     attempt). A number also covers Tunarr's identifier (`C<n>.<digit sum>.tunarr.com`) and resolves through the
     DVR channel map (`/livetv/dvrs`, cached, refetched at most once a minute, and before filtering while a
     configured identifier has no number: the tuner's channel list names channels by number only); identifiers,
@@ -98,7 +99,8 @@ Newest first.
   while plex.tv is down, is hidden, and settles once plex.tv answers, then stays settled through a failed fetch; a
   shared user dropped from a later list stays hidden; a suddenly empty list isn't trusted at once; the tune of 99
   by identifier or number gets 404, never reaches PMS and doesn't block the user, while channel 2 and the owner's
-  and owner device's 99 pass; an identifier from the DVR channel map, at startup and lazily, with the map cached;
+  and owner device's 99 pass; so does a tune of 99 nested in a transcode's path or a play queue's uri (query, form
+  or JSON body), escaped once or twice; an identifier from the DVR channel map, at startup and lazily, with the map cached;
   a guide identifier hides the tuner's channel (Tunarr's at once, another once the map pairs it) and an owner device
   in use stays remembered past 24 hours; the preview header works for the owner token only and never reaches PMS;
   off by default; a response without 99 is byte-identical; an empty body is skipped; an unknown shape naming 99 is

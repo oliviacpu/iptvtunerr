@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"regexp"
 	"sort"
 	"strconv"
@@ -48,7 +49,8 @@ const (
 )
 
 // liveTVChannelPathRE matches /livetv/dvrs/<dvr>/channels/<channel>[/...],
-// which includes the tune request.
+// which includes the tune request, as a request's own path or as a target
+// nested in one (a transcode's path, a play queue's uri).
 var liveTVChannelPathRE = regexp.MustCompile(`^/livetv/dvrs/[^/]+/channels/([^/]+)(?:/|$)`)
 
 // hiddenChannels matches the entries of hidden channels in Plex responses.
@@ -711,22 +713,26 @@ func (p *Proxy) classifyCaller(ctx context.Context, token string) viewerClass {
 }
 
 // refuseHiddenChannel answers 404, without asking PMS, a request naming a
-// hidden channel in its path (a tune, say) from anyone but the owner and the
-// owner's devices. It reports whether it answered.
+// hidden channel (a tune, say) from anyone but the owner and the owner's
+// devices. It reports whether it answered.
 func (p *Proxy) refuseHiddenChannel(w http.ResponseWriter, r *http.Request) bool {
-	m := liveTVChannelPathRE.FindStringSubmatch(r.URL.EscapedPath())
-	if m == nil {
+	ids := channelTargetIDs(r)
+	if len(ids) == 0 {
 		return false
 	}
-	id, err := url.PathUnescape(m[1])
-	if err != nil {
-		id = m[1]
+	anyHidden := func() bool {
+		for _, id := range ids {
+			if p.hidden.channelHidden(id) {
+				return true
+			}
+		}
+		return false
 	}
-	if !p.hidden.channelHidden(id) {
+	if !anyHidden() {
 		// A channel identifier Tunarr's pattern didn't predict: the DVR
 		// channel map may name it (refetched at most every minute).
 		p.hidden.refreshMap(r.Context())
-		if !p.hidden.channelHidden(id) {
+		if !anyHidden() {
 			return false
 		}
 	}
@@ -742,6 +748,122 @@ func (p *Proxy) refuseHiddenChannel(w http.ResponseWriter, r *http.Request) bool
 	p.auditElevation(r, "deny_hidden_channel", token, "channel hidden from shared users (-hide-live-channel) viewer="+class.String())
 	http.NotFound(w, r)
 	return true
+}
+
+// channelTargetIDs lists the channels a request names under
+// /livetv/dvrs/<dvr>/channels/: in its own path, in any query value (a
+// transcode's path, a play queue's uri or path, however escaped), and in a
+// play queue's form or JSON body, as IsLiveTVStreamRequest reads them.
+func channelTargetIDs(r *http.Request) []string {
+	values := []string{r.URL.EscapedPath()}
+	for _, vs := range r.URL.Query() {
+		values = append(values, vs...)
+	}
+	if strings.HasPrefix(r.URL.EscapedPath(), "/playQueues") {
+		if body, ok := readRequestBodyForClassification(r); ok {
+			values = append(values, bodyStringValues(body)...)
+		}
+	}
+	var ids []string
+	for _, v := range values {
+		for _, target := range targetPaths(v) {
+			m := liveTVChannelPathRE.FindStringSubmatch(target)
+			if m == nil {
+				continue
+			}
+			ids = append(ids, m[1])
+			if id, err := url.PathUnescape(m[1]); err == nil && id != m[1] {
+				ids = append(ids, id)
+			}
+		}
+	}
+	return ids
+}
+
+// bodyStringValues is every value of a form body, or every string in a JSON
+// body.
+func bodyStringValues(body []byte) []string {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return nil
+	}
+	if trimmed[0] != '{' && trimmed[0] != '[' {
+		form, err := url.ParseQuery(string(trimmed))
+		if err != nil {
+			return nil
+		}
+		var out []string
+		for _, vs := range form {
+			out = append(out, vs...)
+		}
+		return out
+	}
+	var doc any
+	if json.Unmarshal(trimmed, &doc) != nil {
+		return nil
+	}
+	var out []string
+	var walk func(any)
+	walk = func(node any) {
+		switch n := node.(type) {
+		case string:
+			out = append(out, n)
+		case map[string]any:
+			for _, v := range n {
+				walk(v)
+			}
+		case []any:
+			for _, v := range n {
+				walk(v)
+			}
+		}
+	}
+	walk(doc)
+	return out
+}
+
+// targetPaths is the cleaned server paths a request value may name, decoded
+// as liveTVTarget decodes it: a path, a provider-relative key, or the path in
+// a server://<machine>/<provider>/<path> URI.
+func targetPaths(v string) []string {
+	var out []string
+	for i := 0; i < 5; i++ {
+		out = append(out, targetPathsRaw(v)...)
+		next, err := url.QueryUnescape(v)
+		if err != nil || next == v {
+			next, err = url.PathUnescape(v)
+			if err != nil || next == v {
+				break
+			}
+		}
+		v = next
+	}
+	return out
+}
+
+func targetPathsRaw(v string) []string {
+	v = strings.TrimSpace(v)
+	if strings.HasPrefix(strings.ToLower(v), "tv.plex.providers.epg.xmltv:") {
+		if i := strings.IndexAny(v, "?#"); i >= 0 {
+			v = v[:i]
+		}
+		return []string{path.Clean("/" + v)}
+	}
+	u, err := url.Parse(v)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	if strings.HasPrefix(u.Path, "/") {
+		out = append(out, path.Clean(u.Path))
+	}
+	if u.Scheme != "" && u.Host != "" {
+		rest := strings.TrimPrefix(u.Path, "/")
+		if i := strings.Index(rest, "/"); i >= 0 {
+			out = append(out, path.Clean(rest[i:]))
+		}
+	}
+	return out
 }
 
 // hideLiveChannelEntries removes hidden channels from a Live TV response for

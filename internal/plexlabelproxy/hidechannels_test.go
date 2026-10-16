@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -768,6 +769,58 @@ func TestHideLiveChannel_RefusesToTuneIt(t *testing.T) {
 	p.emitAuditSummary()
 	if logs := f.logs.String(); !strings.Contains(logs, "hidden_removed=1 hidden_refused=6 hidden_leak_suspect=0") {
 		t.Errorf("summary counters wrong:\n%s", logs)
+	}
+}
+
+func TestHideLiveChannel_RefusesItNestedInAStreamStart(t *testing.T) {
+	f := newHideFixture(t)
+	p := f.proxy(t, nil)
+	tune99 := "/livetv/dvrs/4/channels/" + hiddenIdent + "/tune"
+	server99 := "server://machine-1/com.plexapp.plugins.library/livetv/dvrs/4/channels/99/tune"
+	send := func(target, token, contentType, body string) *httptest.ResponseRecorder {
+		var rd io.Reader
+		if body != "" {
+			rd = strings.NewReader(body)
+		}
+		req := httptest.NewRequest(http.MethodPost, target, rd)
+		req.RemoteAddr = "127.0.0.1:12345"
+		req.Header.Set("X-Plex-Token", token)
+		if contentType != "" {
+			req.Header.Set("Content-Type", contentType)
+		}
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
+		return rec
+	}
+	type request struct{ name, target, contentType, body string }
+	nested := []request{
+		{"transcode path", "/video/:/transcode/universal/start?path=" + url.QueryEscape(tune99), "", ""},
+		{"transcode path escaped twice", "/video/:/transcode/universal/start?path=" + url.QueryEscape(url.QueryEscape(tune99)), "", ""},
+		{"play queue uri", "/playQueues?type=video&uri=" + url.QueryEscape(server99), "", ""},
+		{"play queue form body", "/playQueues?type=video", "application/x-www-form-urlencoded", "uri=" + url.QueryEscape(server99)},
+		{"play queue JSON body", "/playQueues?type=video", "application/json", `{"uri":"` + server99 + `"}`},
+	}
+	for _, rq := range nested {
+		if rec := send(rq.target, "friend-token", rq.contentType, rq.body); rec.Code != http.StatusNotFound {
+			t.Errorf("%s: a shared user got %d, want 404", rq.name, rec.Code)
+		}
+	}
+	if n := f.callsTo("/video/:/transcode/universal/start") + f.callsTo("/playQueues"); n != 0 {
+		t.Fatalf("%d refused stream starts reached PMS", n)
+	}
+	// Channel 2 nested the same way passes, and so does the owner's 99.
+	tune2 := "/video/:/transcode/universal/start?path=" + url.QueryEscape("/livetv/dvrs/4/channels/C2.50.tunarr.com/tune")
+	if rec := send(tune2, "friend-token", "", ""); rec.Code != http.StatusOK {
+		t.Errorf("channel 2: status %d", rec.Code)
+	}
+	for _, rq := range nested {
+		if rec := send(rq.target, "owner-token", rq.contentType, rq.body); rec.Code != http.StatusOK {
+			t.Errorf("%s: the owner got %d", rq.name, rec.Code)
+		}
+	}
+	// The owner's form body still reaches PMS whole.
+	if n := f.callsTo("/playQueues"); n != 3 {
+		t.Errorf("%d of the owner's play queues reached PMS, want 3", n)
 	}
 }
 
