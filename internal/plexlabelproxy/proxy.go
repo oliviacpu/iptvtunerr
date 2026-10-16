@@ -157,6 +157,21 @@ type Config struct {
 	// AuditSummaryInterval emits aggregate proxy audit counters at this cadence.
 	// Zero uses a conservative default; a negative value disables summaries.
 	AuditSummaryInterval time.Duration
+
+	// LiveViewers, when true, remembers which Plex account is behind each
+	// client that starts Live TV with an elevated token, and serves the list at
+	// LiveViewersPath to callers presenting OwnerToken. Accounts come from
+	// plex.tv's share list for this server (PlexTVURL). Applies with
+	// ElevateLiveTV.
+	LiveViewers bool
+
+	// PlexTVURL is plex.tv's base URL for LiveViewers. Empty means https://plex.tv.
+	PlexTVURL string
+
+	// LiveViewersKey, when at least 24 characters, also lets a caller read
+	// LiveViewersPath with "Authorization: Bearer <key>", so a monitoring tool
+	// doesn't need the owner token. It grants nothing else.
+	LiveViewersKey string
 }
 
 // Proxy implements the reverse proxy with rewrite hooks.
@@ -183,6 +198,11 @@ type Proxy struct {
 
 	statsMu sync.Mutex
 	stats   auditStats
+
+	// viewers is set with Config.LiveViewers.
+	viewers *liveViewerTracker
+	// afterViewerLog, when set (tests), runs after each new-viewer log line.
+	afterViewerLog func()
 }
 
 type abuseConfig struct {
@@ -288,6 +308,13 @@ func New(cfg Config) (*Proxy, error) {
 			since:    time.Now(),
 			bySource: make(map[string]int),
 		},
+	}
+	if cfg.LiveViewers && strings.TrimSpace(cfg.OwnerToken) != "" {
+		plexTV := strings.TrimSpace(cfg.PlexTVURL)
+		if plexTV == "" {
+			plexTV = "https://plex.tv"
+		}
+		p.viewers = newLiveViewerTracker(plexShareFetcher(u, plexTV, strings.TrimSpace(cfg.OwnerToken), cfg.Transport))
 	}
 	p.loadAbuseState()
 
@@ -435,6 +462,10 @@ func (p *Proxy) auditElevation(req *http.Request, outcome, token, reason string)
 
 // ServeHTTP implements http.Handler.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if p.viewers != nil && r.URL.Path == LiveViewersPath {
+		p.serveLiveViewers(w, r)
+		return
+	}
 	if p.isBlocked(r) {
 		p.auditElevation(r, "blocked_bad_actor", inboundPlexToken(r), "temporary block after repeated bad elevation attempts")
 		http.Error(w, "too many unauthorized requests", http.StatusTooManyRequests)
@@ -540,6 +571,7 @@ func (p *Proxy) modifyResponse(resp *http.Response) error {
 	if err := p.scrubOwnerToken(resp); err != nil {
 		return err
 	}
+	p.recordAcceptedLiveViewer(resp)
 	if resp.StatusCode != http.StatusOK {
 		return nil
 	}
@@ -662,6 +694,8 @@ func (p *Proxy) elevateLiveTVRequest(req *http.Request, originalToken string) {
 		return
 	}
 	p.auditElevation(req, "elevated_live_tv", elevationToken, "owner token borrowed for authorized Live TV request")
+
+	p.markLiveViewer(req, elevationToken)
 
 	// X-Plex-User injection: send the original user token in a supplementary
 	// header so Plex may attribute the session to the user rather than the owner.
