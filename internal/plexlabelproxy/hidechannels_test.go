@@ -190,7 +190,28 @@ func (f *hideFixture) proxy(t *testing.T, edit func(*Config)) *Proxy {
 	if err != nil {
 		t.Fatalf("new proxy: %v", err)
 	}
+	if p.viewers != nil {
+		// A share list that needs confirming is refetched at once, not a
+		// minute later.
+		p.viewers.retryAfter = 0
+	}
 	return p
+}
+
+// settleOwnerDevice makes token one of the owner's devices: first seen, then
+// a share list (without it) fetched and confirmed after that.
+func settleOwnerDevice(t *testing.T, p *Proxy, token string) {
+	t.Helper()
+	fp := tokenFingerprint(token)
+	p.viewers.classify(fp, time.Now())
+	for i := 0; i < 2; i++ {
+		if err := p.viewers.refreshAccounts(context.Background(), time.Now()); err != nil {
+			t.Fatalf("share list: %v", err)
+		}
+	}
+	if c, _ := p.viewers.classify(fp, time.Now()); c != viewerOwnerDevice {
+		t.Fatalf("%s is %s, want owner_device", token, c)
+	}
 }
 
 // baseline is the same proxy without -hide-live-channel.
@@ -504,6 +525,7 @@ func TestHideLiveChannel_KeepsAProgramsOtherAirings(t *testing.T) {
 func TestHideLiveChannel_OwnerAndOwnerDevicesSeeEverything(t *testing.T) {
 	f := newHideFixture(t)
 	p, base := f.proxy(t, nil), f.baseline(t)
+	settleOwnerDevice(t, p, "owner-device-token")
 	for path := range hideFixturePaths {
 		for _, format := range []string{"json", "xml"} {
 			for _, token := range []string{"owner-token", "owner-device-token"} {
@@ -542,11 +564,12 @@ func TestHideLiveChannel_HidesItFromAnUnsettledCaller(t *testing.T) {
 	if !strings.Contains(f.logs.String(), "plexlabelproxy_hide: share list fetch failed") {
 		t.Errorf("the failed fetch wasn't logged:\n%s", f.logs.String())
 	}
-	// plex.tv is back: the next fetch settles it as the owner's device.
+	// plex.tv is back: the first list is confirmed by the next fetch, which
+	// settles it as the owner's device.
 	f.plexTVDown.Store(false)
-	p.viewers.mu.Lock()
-	p.viewers.retryAfter = 0
-	p.viewers.mu.Unlock()
+	if gridShows("owner-device-token") {
+		t.Error("an unconfirmed first share list settled the owner device")
+	}
 	if !gridShows("owner-device-token") {
 		t.Error("the settled owner device still doesn't see the channel")
 	}
@@ -663,6 +686,61 @@ func TestLiveViewerTracker_ClassifyDistrustsAFirstEmptyShareList(t *testing.T) {
 	want("fp-later", 3*accountsRetry+2*time.Second, viewerOwnerDevice)
 }
 
+func TestLiveViewerTracker_ClassifyConfirmsAPartialShareList(t *testing.T) {
+	list := []string{"fp-a"}
+	tr := newLiveViewerTracker(func(context.Context) (shareList, error) {
+		out := map[string]plexAccount{}
+		for _, fp := range list {
+			out[fp] = plexAccount{id: fp}
+		}
+		return shareList{accounts: out, machineIdentifier: "m"}, nil
+	})
+	ctx := context.Background()
+	t0 := time.Unix(1_800_000_000, 0)
+	step := 0
+	fetch := func(accounts ...string) {
+		t.Helper()
+		list = accounts
+		step++
+		_ = tr.refreshAccounts(ctx, t0.Add(time.Duration(step)*accountsRetry))
+	}
+	want := func(fp string, wantClass viewerClass) {
+		t.Helper()
+		if c, _ := tr.classify(fp, t0.Add(time.Duration(step)*accountsRetry+time.Second)); c != wantClass {
+			t.Fatalf("after fetch %d, %s is %s, want %s", step, fp, c, wantClass)
+		}
+	}
+
+	// The first list may be partial (fp-b is shared too): it settles nobody
+	// until the next fetch returns the same list.
+	want("fp-b", viewerUnsettled)
+	fetch("fp-a")
+	want("fp-b", viewerUnsettled)
+	fetch("fp-a", "fp-b")
+	want("fp-b", viewerFriend)
+	want("fp-device", viewerUnsettled)
+	fetch("fp-a", "fp-b")
+	want("fp-device", viewerOwnerDevice)
+
+	// A list lacking someone the trusted one had (plex.tv answering partly)
+	// settles nobody new; one that has everyone again does.
+	want("fp-new", viewerUnsettled)
+	fetch("fp-a")
+	want("fp-new", viewerUnsettled)
+	want("fp-b", viewerFriend)
+	fetch("fp-a", "fp-b")
+	want("fp-new", viewerOwnerDevice)
+
+	// A shrunken list that the next fetch repeats is believed (fp-b was
+	// unshared), though fp-b stays a friend.
+	want("fp-later", viewerUnsettled)
+	fetch("fp-a")
+	want("fp-later", viewerUnsettled)
+	fetch("fp-a")
+	want("fp-later", viewerOwnerDevice)
+	want("fp-b", viewerFriend)
+}
+
 func TestLiveViewerTracker_ClassifyBoundsWhatItRemembers(t *testing.T) {
 	tr := newLiveViewerTracker(func(context.Context) (shareList, error) { return shareList{}, nil })
 	t0 := time.Unix(1_800_000_000, 0)
@@ -691,6 +769,7 @@ func TestLiveViewerTracker_ClassifyKeepsAnActiveOwnerDevice(t *testing.T) {
 	t0 := time.Unix(1_800_000_000, 0)
 	tr.classify("fp-device", t0)
 	_ = tr.refreshAccounts(context.Background(), t0.Add(time.Second))
+	_ = tr.refreshAccounts(context.Background(), t0.Add(accountsRetry+time.Second))
 	for _, at := range []time.Duration{time.Minute, 23 * time.Hour, 46 * time.Hour} {
 		// A new token prunes the table; the device, used within the last
 		// 24 hours, stays remembered as the owner's.
@@ -733,14 +812,37 @@ func TestHideLiveChannel_HidesTheTunerChannelOfAGuideIdentifier(t *testing.T) {
 		if s := deviceChannels(t, p, "1"); s.entries["DeviceChannel"] != 2 || s.size != "2" {
 			t.Errorf("tuner channels %+v, want 99's removed", s)
 		}
-		// Paired, the map isn't fetched for every response.
+		// The map isn't fetched for every response...
 		calls := f.callsTo("/livetv/dvrs")
+		deviceChannels(t, p, "1")
+		if n := f.callsTo("/livetv/dvrs"); n != calls {
+			t.Errorf("channel map fetched again (%d -> %d) within a minute", calls, n)
+		}
+		// ...but a minute later it is, and follows Plex moving the channel to
+		// another tuner channel.
+		f.mu.Lock()
+		f.dvrsXML = strings.ReplaceAll(f.dvrsXML, `Identifier="99"`, `Identifier="2"`)
+		f.mu.Unlock()
 		p.hidden.mu.Lock()
 		p.hidden.mapTriedAt = time.Now().Add(-2 * hiddenMapMaxAge)
 		p.hidden.mu.Unlock()
-		deviceChannels(t, p, "1")
-		if n := f.callsTo("/livetv/dvrs"); n != calls {
-			t.Errorf("channel map fetched again (%d -> %d) once paired", calls, n)
+		var doc struct {
+			MediaContainer struct {
+				DeviceChannel []struct {
+					Identifier string `json:"identifier"`
+				}
+			}
+		}
+		body := hideBody(t, hideServe(p, http.MethodGet, "/media/grabbers/devices/1/channels", "friend-token", "json"))
+		if err := json.Unmarshal(body, &doc); err != nil {
+			t.Fatal(err)
+		}
+		var ids []string
+		for _, c := range doc.MediaContainer.DeviceChannel {
+			ids = append(ids, c.Identifier)
+		}
+		if !slices.Equal(ids, []string{"1", "99"}) {
+			t.Errorf("after the remap, tuner channels %q, want 1 and 99", ids)
 		}
 	})
 	t.Run("only on its own device", func(t *testing.T) {
@@ -934,6 +1036,7 @@ func TestHideLiveChannel_PreviewHeaderIsTheOwnersOnlyAndNeverForwarded(t *testin
 		t.Errorf("the owner's preview tune: status %d, want 404", rec.Code)
 	}
 	// Without the owner token the header does nothing.
+	settleOwnerDevice(t, p, "owner-device-token")
 	if body := hideBody(t, hideServe(p, http.MethodGet, grid, "owner-device-token", "json", preview...)); !bytes.Contains(body, []byte(hiddenIdent)) {
 		t.Error("the header hid the channel from the owner's device")
 	}

@@ -454,8 +454,9 @@ iptv-tunerr plex-label-proxy -elevate-live-tv -hide-live-channel=99 ...
   for other guides. An identifier hides that channel only. The tuner's channel
   list names channels by number only, so an identifier's tuner entry is hidden
   once the channel map pairs it with its device's channel (the map is reread,
-  at most once a minute, until it does). The startup
-  log names what is hidden and whether Plex's channel map has it yet:
+  at most once a minute, before a tuner's channel list is filtered and until
+  it pairs). The startup log names what is hidden and whether Plex's channel
+  map has it yet:
   `plex-label-proxy: hiding Live TV channel(s) from shared users: 99
   (C99.114.tunarr.com; in Plex's channel map)`.
 - It needs `-elevate-live-tv` (or `-elevate-all`) and the owner token. It is
@@ -464,9 +465,12 @@ iptv-tunerr plex-label-proxy -elevate-live-tv -hide-live-channel=99 ...
   their own tokens, so the proxy tells them apart from shared users by plex.tv's
   share list (the one `-live-viewers` uses): a token on the list is a shared
   user's, and stays one even if a later list lacks it; a token missing from a
-  list fetched after the token was first seen is one of the owner's devices.
-  Anything not settled yet, or a request without a token, is treated like a
-  shared user. An unsettled token waits up to 2 seconds for a share-list fetch.
+  trusted list fetched after the token was first seen is one of the owner's
+  devices. A list is trusted when it still has everyone the last trusted list
+  had; the first list, or one lacking someone (plex.tv may answer partly), is
+  trusted once the next fetch, a minute later, returns the same list. Anything
+  not settled yet, or a request without a token, is treated like a shared
+  user. An unsettled token waits up to 2 seconds for a share-list fetch.
 - **What shared users get:** the channel is removed from Live TV responses, in
   JSON and XML, gzipped or not: lineup `Channel` entries, guide and hub airings
   (`Media`; a program left with none goes too), a program's `Channel` tags,
@@ -500,9 +504,10 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST -H "X-Plex-Token: $OWNER_TOKEN"
   TV source's show and favourites views, with no airings. Plex's WebSocket
   notifications aren't filtered. A Plex Home member other than the owner whose
   token isn't on the share list is taken for one of the owner's devices. One of
-  the owner's devices is treated like a shared user until a share list fetched
-  after its token was first seen settles it: about a minute at most, longer
-  while plex.tv is unreachable.
+  the owner's devices is treated like a shared user until a trusted share list
+  fetched after its token was first seen settles it: a minute or two after the
+  proxy starts or the token is first seen, longer while plex.tv is
+  unreachable or answers partly.
 
 ## Make The Proxy The Only Front Door
 

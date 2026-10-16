@@ -7,6 +7,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"sort"
@@ -91,13 +92,15 @@ type liveViewerTracker struct {
 	// of the owner's devices. seen is when a token was first classified, and
 	// last classified (which keeps it remembered).
 	// classifiedAt is when the last share list trusted for classification was
-	// fetched (its start); an empty list that's the first, or follows a
-	// non-empty one, isn't trusted until a second one agrees (emptyOnce).
+	// fetched (its start). A list is trusted when it keeps everyone the last
+	// trusted one had; the first list, or one that lacks someone (plex.tv may
+	// answer partly or empty), is trusted only once the next fetch returns
+	// the same list (pendingList holds it until then).
 	friends      map[string]time.Time
 	seen         map[string]tokenSeen
 	classifiedAt time.Time
-	lastListSize int
-	emptyOnce    bool
+	trustedList  map[string]bool
+	pendingList  map[string]bool
 }
 
 // shareList is plex.tv's share list for the server: shared users by token
@@ -278,23 +281,41 @@ func (t *liveViewerTracker) refreshAccounts(ctx context.Context, now time.Time) 
 			t.friends[fp] = now
 		}
 		t.pruneTokensLocked(now)
-		// An empty list, the first one or right after a non-empty one, may be
-		// plex.tv misbehaving: trusting it would make every newly seen friend
-		// look like an owner device. A second empty list in a row is believed
-		// (nobody is shared with, or everyone was unshared).
-		firstOrSudden := t.classifiedAt.IsZero() || t.lastListSize > 0
-		if len(list.accounts) == 0 && firstOrSudden && !t.emptyOnce {
-			t.emptyOnce = true
-		} else {
-			t.emptyOnce = false
-			t.lastListSize = len(list.accounts)
-			t.classifiedAt = now
-		}
+		t.trustListLocked(list, now)
 	}
 	t.refreshing = nil
 	t.mu.Unlock()
 	close(done)
 	return err
+}
+
+// trustListLocked decides whether a share list fetched at now settles the
+// tokens first seen before it. A list missing someone may be plex.tv
+// answering partly or empty, and trusting it would make every newly seen
+// shared user missing from it look like one of the owner's devices; so the
+// first list, and one lacking anyone the last trusted list had, wait for the
+// next fetch to return the same list.
+func (t *liveViewerTracker) trustListLocked(list shareList, now time.Time) {
+	current := make(map[string]bool, len(list.accounts))
+	for fp := range list.accounts {
+		current[fp] = true
+	}
+	confirmed := t.trustedList != nil
+	for fp := range t.trustedList {
+		if !current[fp] {
+			confirmed = false
+			break
+		}
+	}
+	if !confirmed && t.pendingList != nil && maps.Equal(t.pendingList, current) {
+		confirmed = true
+	}
+	if !confirmed {
+		t.pendingList = current
+		return
+	}
+	t.trustedList, t.pendingList = current, nil
+	t.classifiedAt = now
 }
 
 // viewerClass is who a Live TV caller is, for -hide-live-channel.

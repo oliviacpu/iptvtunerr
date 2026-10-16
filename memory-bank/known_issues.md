@@ -11,7 +11,7 @@
 - **A show airing only on a hidden channel still lists** in the Live TV source's show and favourites views, with no airings: those views list shows, not channels.
 - **Plex's WebSocket notifications aren't filtered**, so a client may briefly learn of activity on a hidden channel (no lineup or tune).
 - **A Plex Home member other than the owner** whose token isn't on plex.tv's share list is taken for one of the owner's devices and sees hidden channels. The Home is only the owner today.
-- **One of the owner's devices is treated like a shared user** until a share list fetched after its token was first seen settles it: about a minute (the share list's retry delay), longer while plex.tv is unreachable.
+- **One of the owner's devices is treated like a shared user** until a trusted share list fetched after its token was first seen settles it. The first list, or one lacking someone, is trusted only when the next fetch (a minute later, the retry delay) repeats it, so this takes a minute or two after a start or a new token, longer while plex.tv is unreachable or answers partly. A partial list repeated twice would still be trusted.
 - **A hidden guide identifier** hides the tuner's channel list entry (`/media/grabbers/devices/<n>/channels`, numbers only) only once Plex's DVR channel map pairs it with its device's channel. A hidden number hides that number on every DVR.
 - **Unknown response shapes pass unchanged**; `outcome=leak_suspect` flags one that still names a hidden channel.
 

@@ -75,8 +75,9 @@ type hiddenChannels struct {
 	// may be another channel on another device.
 	tunerChannels map[string]bool
 	// unpaired holds configured identifiers the DVR channel map hasn't paired
-	// with a tuner channel yet; while there are any, the map is refetched (at
-	// most every hiddenMapMaxAge) before filtering.
+	// with a tuner channel; while there are any, the map is refetched (at most
+	// every hiddenMapMaxAge) before filtering. It's also refetched before a
+	// tuner's channel list is filtered.
 	unpaired    map[string]bool
 	mapTriedAt  time.Time
 	mapResolved bool
@@ -188,17 +189,28 @@ func (h *hiddenChannels) refreshMap(ctx context.Context) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	// The identifiers' tuner pairings are rebuilt from each map, as Plex may
+	// have moved a channel to another tuner channel.
+	tuner, paired, resolved := map[string]bool{}, map[string]bool{}, false
 	for _, m := range mappings {
 		switch {
 		case h.numbers[m.lineupID] || h.numbers[m.deviceID]:
 			addNonEmpty(h.idents, m.key)
-			h.mapResolved = true
+			resolved = true
 		case h.idents[m.key]:
 			if m.deviceID != "" {
-				h.tunerChannels[m.device+"\x00"+m.deviceID] = true
-				delete(h.unpaired, m.key)
+				tuner[m.device+"\x00"+m.deviceID] = true
+				paired[m.key] = true
 			}
-			h.mapResolved = true
+			resolved = true
+		}
+	}
+	h.tunerChannels, h.mapResolved = tuner, resolved
+	for _, v := range h.configured {
+		if !isChannelNumber(v) && !paired[v] {
+			h.unpaired[v] = true
+		} else {
+			delete(h.unpaired, v)
 		}
 	}
 }
@@ -921,8 +933,9 @@ func (p *Proxy) hideLiveChannelEntries(resp *http.Response) error {
 
 	out := body
 	if onPath {
-		if p.hidden.needsMap() {
-			// The tuner's channels are named by number only.
+		if p.hidden.needsMap() || tunerDevice(path) != "" {
+			// The tuner's channels are named by number only: an identifier's
+			// tuner channel comes from a current DVR channel map.
 			p.hidden.refreshMap(resp.Request.Context())
 		}
 		run := &hideRun{h: p.hidden, device: tunerDevice(path)}
