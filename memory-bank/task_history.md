@@ -554,3 +554,8 @@
 
 - Plex records a shared user's elevated Live TV under the owner. With `-live-viewers`, each elevated Live TV start PMS accepts records its client identifier against the token fingerprint; plex.tv's share list for the server names the account. `GET /iptvtunerr/live-viewers` (owner token, or `IPTV_TUNERR_PROXY_LIVE_VIEWERS_KEY` as a bearer key) lists them for monitoring tools; the Tracearr fork uses it.
 - Verification: new `liveviewers_test.go` (attribution, auth and 404s, off by default, refresh rules, expiry, key handling, refused starts not recorded, quoted log identifiers); `go vet`, the `plexlabelproxy` suite (same macOS exception) and `go build ./cmd/iptv-tunerr/` passed.
+
+## 2026-10-16 - Fork: `-hide-live-channel` keeps a Live TV channel to the owner
+
+- Plex has no per-user channel list. With `-hide-live-channel=99`, the proxy removes channel 99 from the Live TV responses (lineups, guide, hubs, search, DVR mappings, tuner channels; JSON and XML, gzip kept) it hands anyone but the owner and the owner's devices, and answers 404 to tunes of it without asking PMS. The owner's devices are told apart from shared users by plex.tv's share list (the `-live-viewers` tracker); unsettled callers get the shared view. An owner-only `X-Iptvtunerr-View-As: friend` header previews the shared view; `-hide-live-channel-debug` and `plexlabelproxy_hide` log lines show what was removed.
+- Verification: new `hidechannels_test.go` over anonymised fixtures (owner, owner device, shared user, unsettled; tunes; preview; off by default; leak check; tracker rules) and a flag test; `go vet`, the `plexlabelproxy` suite (macOS socket-path test excepted) and the race detector on the new tests passed.

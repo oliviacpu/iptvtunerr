@@ -172,6 +172,18 @@ type Config struct {
 	// LiveViewersPath with "Authorization: Bearer <key>", so a monitoring tool
 	// doesn't need the owner token. It grants nothing else.
 	LiveViewersKey string
+
+	// HideLiveChannels names Live TV channels (by number, e.g. "99", or by
+	// guide identifier, e.g. "C99.114.tunarr.com") that only the owner sees:
+	// they're removed from the Live TV responses shared users get, and tuning
+	// them gets 404. The owner's own apps are told apart from shared users by
+	// plex.tv's share list (PlexTVURL). Needs OwnerToken and ElevateLiveTV or
+	// ElevateAll. See hidechannels.go.
+	HideLiveChannels []string
+
+	// HideLiveChannelsDebug logs, for the owner's requests, how many hidden
+	// entries a response had (outcome=owner_kept), without changing them.
+	HideLiveChannelsDebug bool
 }
 
 // Proxy implements the reverse proxy with rewrite hooks.
@@ -199,8 +211,11 @@ type Proxy struct {
 	statsMu sync.Mutex
 	stats   auditStats
 
-	// viewers is set with Config.LiveViewers.
+	// viewers is set with Config.LiveViewers or Config.HideLiveChannels (the
+	// share list tells shared users from the owner's devices).
 	viewers *liveViewerTracker
+	// hidden is set with Config.HideLiveChannels.
+	hidden *hiddenChannels
 	// afterViewerLog, when set (tests), runs after each new-viewer log line.
 	afterViewerLog func()
 }
@@ -232,6 +247,9 @@ type auditStats struct {
 	authUnavailable  int
 	blockedSources   int
 	blockedRequests  int
+	hiddenRemoved    int
+	hiddenRefused    int
+	hiddenLeak       int
 	bySource         map[string]int
 }
 
@@ -309,7 +327,18 @@ func New(cfg Config) (*Proxy, error) {
 			bySource: make(map[string]int),
 		},
 	}
-	if cfg.LiveViewers && strings.TrimSpace(cfg.OwnerToken) != "" {
+	hide := parseHiddenChannelValues(cfg.HideLiveChannels)
+	if len(hide) > 0 {
+		if strings.TrimSpace(cfg.OwnerToken) == "" || !(cfg.ElevateLiveTV || cfg.ElevateAll) {
+			return nil, errors.New("plexlabelproxy: HideLiveChannels needs OwnerToken and ElevateLiveTV or ElevateAll")
+		}
+		mapToken := strings.TrimSpace(cfg.Token)
+		if mapToken == "" {
+			mapToken = strings.TrimSpace(cfg.OwnerToken)
+		}
+		p.hidden = newHiddenChannels(hide, dvrChannelMapFetcher(u, mapToken, cfg.Transport))
+	}
+	if (cfg.LiveViewers || p.hidden != nil) && strings.TrimSpace(cfg.OwnerToken) != "" {
 		plexTV := strings.TrimSpace(cfg.PlexTVURL)
 		if plexTV == "" {
 			plexTV = "https://plex.tv"
@@ -397,6 +426,9 @@ func New(cfg Config) (*Proxy, error) {
 			inboundPlexToken(req) == owner && strings.TrimSpace(originalToken) != owner {
 			*req = *req.WithContext(context.WithValue(req.Context(), clientTokenContextKey{}, strings.TrimSpace(originalToken)))
 		}
+		// -hide-live-channel: who's asking (their own token) and whether the
+		// owner asked for the friend view; ViewAsHeader never reaches PMS.
+		p.noteHideCaller(req, originalToken)
 	}
 	p.reverseProxy = rp
 	return p, nil
@@ -462,13 +494,16 @@ func (p *Proxy) auditElevation(req *http.Request, outcome, token, reason string)
 
 // ServeHTTP implements http.Handler.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if p.viewers != nil && r.URL.Path == LiveViewersPath {
+	if p.cfg.LiveViewers && p.viewers != nil && r.URL.Path == LiveViewersPath {
 		p.serveLiveViewers(w, r)
 		return
 	}
 	if p.isBlocked(r) {
 		p.auditElevation(r, "blocked_bad_actor", inboundPlexToken(r), "temporary block after repeated bad elevation attempts")
 		http.Error(w, "too many unauthorized requests", http.StatusTooManyRequests)
+		return
+	}
+	if p.hidden != nil && p.refuseHiddenChannel(w, r) {
 		return
 	}
 	logAccess := shouldLogProxyAccess(r)
@@ -572,6 +607,9 @@ func (p *Proxy) modifyResponse(resp *http.Response) error {
 		return err
 	}
 	p.recordAcceptedLiveViewer(resp)
+	if err := p.hideLiveChannelEntries(resp); err != nil {
+		return err
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil
 	}
@@ -1429,9 +1467,24 @@ func (p *Proxy) recordAuditOutcome(outcome, source string) {
 		p.stats.blockedSources++
 	case "blocked_bad_actor":
 		p.stats.blockedRequests++
+	case "deny_hidden_channel":
+		p.stats.hiddenRefused++
 	}
 	if source != "" {
 		p.stats.bySource[source]++
+	}
+}
+
+// recordHideOutcome counts a -hide-live-channel response outcome for the
+// audit summary: "removed" or "leak_suspect".
+func (p *Proxy) recordHideOutcome(outcome string) {
+	p.statsMu.Lock()
+	defer p.statsMu.Unlock()
+	switch outcome {
+	case "removed":
+		p.stats.hiddenRemoved++
+	case "leak_suspect":
+		p.stats.hiddenLeak++
 	}
 }
 
@@ -1452,7 +1505,7 @@ func (p *Proxy) emitAuditSummary() {
 	p.statsMu.Unlock()
 	top := topAuditSources(stats.bySource, 5)
 	p.logger.Printf(
-		"plexlabelproxy_audit_summary: since=%s elevated=%d deny_missing=%d deny_unauthorized=%d deny_auth_cooldown=%d auth_unavailable=%d auth_cache_hit=%d auth_cache_miss=%d blocked_sources=%d blocked_requests=%d top_sources=%q",
+		"plexlabelproxy_audit_summary: since=%s elevated=%d deny_missing=%d deny_unauthorized=%d deny_auth_cooldown=%d auth_unavailable=%d auth_cache_hit=%d auth_cache_miss=%d blocked_sources=%d blocked_requests=%d hidden_removed=%d hidden_refused=%d hidden_leak_suspect=%d top_sources=%q",
 		stats.since.Format(time.RFC3339),
 		stats.elevated,
 		stats.denyMissing,
@@ -1463,6 +1516,9 @@ func (p *Proxy) emitAuditSummary() {
 		stats.authCacheMiss,
 		stats.blockedSources,
 		stats.blockedRequests,
+		stats.hiddenRemoved,
+		stats.hiddenRefused,
+		stats.hiddenLeak,
 		strings.Join(top, ","),
 	)
 }

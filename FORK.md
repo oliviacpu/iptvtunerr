@@ -60,6 +60,58 @@ Newest first.
 - **Upstream:** not sent / issue or PR link.
 -->
 
+### Hide a Live TV channel from shared users: `-hide-live-channel` (2026-10-16)
+
+- **What it fixes:** the owner wants a test channel in Plex's Live TV that shared users don't see or tune. Plex has
+  no per-user channel list: everyone with Live TV gets the DVR's whole lineup.
+- **Cause:** shared users get Live TV only through the proxy, which passed Plex's channel lists, guide and tunes
+  through unchanged.
+- **Fix:**
+  - `hidechannels.go`: with `-hide-live-channel` (`Config.HideLiveChannels`, numbers or guide identifiers), Live TV
+    responses for anyone but the owner and the owner's devices lose the hidden channels' entries, in JSON (a generic
+    walk with `UseNumber`, re-encoded only when changed) and XML (a small element tree, declaration kept): lineup
+    `Channel`s, guide and hub airings (`Media`; a program left with none goes), `Channel` tags, `SearchResult`s,
+    `ChannelMapping`s and `DeviceChannel`s, with `size`, `totalSize` and `X-Plex-Container-Total-Size` lowered,
+    `X-Plex-Content-*-Length` dropped and `Cache-Control: private, no-store`. Gzip is kept. Their requests on these
+    paths lose `If-None-Match`/`If-Modified-Since`, so a 304 can't revive a body cached unfiltered. A request naming a
+    hidden channel under `/livetv/dvrs/<dvr>/channels/`, in its path, any query value or a play queue's body (the
+    nested targets `IsLiveTVStreamRequest` elevates), gets 404 without reaching PMS (`deny_hidden_channel`, not a bad
+    attempt). A number hides that number on every DVR: it covers Tunarr's identifier (`C<n>.<digit sum>.tunarr.com`)
+    and the identifiers the current DVR channel map (`/livetv/dvrs`, cached, refetched at most once a minute) pairs
+    with it; nothing is learned from responses beyond the one being filtered (its airings name the Plex channel ids
+    and titles its `Channel` tags drop). An identifier hides that channel only; its tuner entry (the tuner's channel
+    list names channels by number only) once the map pairs it with its device's channel, rereading the map (at most
+    once a minute) before a tuner's channel list is filtered and until it pairs.
+  - Who's the owner: the owner token, or a token missing from a plex.tv share list fetched after it was first seen
+    (the owner's own apps); a token on a share list is a shared user's for good. Tokens are remembered 24 hours
+    after they were last seen, 1000 at most. Unsettled callers and requests without a token get the shared view,
+    after waiting up to 2 seconds for a share-list fetch. `liveviewers.go`'s tracker does this (`classify`); it's
+    created for either feature, and only a trusted list settles anyone: one that keeps everyone the last trusted list
+    had, or the first or a shrunken list once the next fetch returns the same one (plex.tv may answer partly).
+  - Checking it: `plexlabelproxy_hide: outcome=removed|leak_suspect|unparsed` lines and `hidden_removed=`,
+    `hidden_refused=`, `hidden_leak_suspect=` in the summary; `-hide-live-channel-debug` logs `outcome=owner_kept
+    present=<n>` for the owner's responses; the owner token with `X-Iptvtunerr-View-As: friend` gets the shared
+    view (the header is stripped before PMS, always).
+  - `proxy.go` and `cmd_plex_label_proxy.go`: config, the repeatable flag, the startup check (owner token and
+    `-elevate-live-tv` or `-elevate-all`) and log line. `-live-viewers`' path and recording stay tied to its own
+    flag. **Docs:** the runbook's "Hide channels from shared users".
+- **Test:** `hidechannels_test.go` with anonymised fixtures in `testdata/hidechannels/` (channels 1, 2 and 99, a
+  program only on 99 and one on 2 and 99): a shared user never sees 99 in any shape, JSON or XML, gzipped or not, with
+  sizes, headers and Content-Length right, and a program on 2 and 99 keeps its channel-2 airing; the owner's and the
+  owner's device's responses are byte-identical to the proxy without the flag; no token, or an owner device while
+  plex.tv is down, is hidden, and settles once plex.tv answers, then stays settled through a failed fetch; a shared
+  user dropped from a later list stays hidden; a first, partial or empty list isn't trusted until repeated; the tune
+  of 99 by identifier or number gets 404, never reaches PMS and doesn't block the user, while channel 2 and the
+  owner's and owner device's 99 pass; a tune of 99 nested in a transcode's path or a play queue's uri (query, form or
+  JSON body), escaped once or twice, gets 404 too; an identifier from the DVR channel map, at startup and lazily, with
+  the map cached; a guide identifier hides its tuner channel once the map pairs it, on its own device only, and leaves
+  another DVR's same number alone; an identifier's tuner pairing and a number's identifiers follow a remap; a shared
+  view is never a 304; an owner device in use stays remembered past 24 hours; the preview header works for the owner
+  token only and never reaches PMS; off by default; a response without 99 is byte-identical; an empty body is skipped;
+  an unknown shape naming 99 is flagged `leak_suspect`; debug counts without changing; no raw token in any test's
+  logs. `cmd_plex_label_proxy_test.go`: the flag repeats and splits commas.
+- **Upstream:** not sent.
+
 ### Who is watching Live TV: `-live-viewers` (2026-10-16)
 
 - **What it fixes:** Plex records a shared user's Live TV under the owner, because the proxy tuned it with the owner
