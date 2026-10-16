@@ -93,18 +93,18 @@ Newest first.
     `-elevate-live-tv` or `-elevate-all`) and log line. `-live-viewers`' path and recording stay tied to its own
     flag. **Docs:** the runbook's "Hide channels from shared users".
 - **Test:** `hidechannels_test.go` with anonymised fixtures in `testdata/hidechannels/` (channels 1, 2 and 99, a
-  program only on 99 and one on 2 and 99): a shared user never sees 99 in any shape, JSON or XML, gzipped or not,
-  with sizes, headers and Content-Length right, and a program on 2 and 99 keeps its channel-2 airing; the owner's
-  and the owner's device's responses are byte-identical to the proxy without the flag; no token, or an owner device
-  while plex.tv is down, is hidden, and settles once plex.tv answers, then stays settled through a failed fetch; a
-  shared user dropped from a later list stays hidden; a suddenly empty list isn't trusted at once; the tune of 99
-  by identifier or number gets 404, never reaches PMS and doesn't block the user, while channel 2 and the owner's
-  and owner device's 99 pass; so does a tune of 99 nested in a transcode's path or a play queue's uri (query, form
-  or JSON body), escaped once or twice; an identifier from the DVR channel map, at startup and lazily, with the map cached;
-  a guide identifier hides the tuner's channel (Tunarr's at once, another once the map pairs it) and an owner device
-  in use stays remembered past 24 hours; the preview header works for the owner token only and never reaches PMS;
-  off by default; a response without 99 is byte-identical; an empty body is skipped; an unknown shape naming 99 is
-  flagged `leak_suspect`; debug counts without changing; no raw token in any test's logs.
+  program only on 99 and one on 2 and 99): a shared user never sees 99 in any shape, JSON or XML, gzipped or not, with
+  sizes, headers and Content-Length right, and a program on 2 and 99 keeps its channel-2 airing; the owner's and the
+  owner's device's responses are byte-identical to the proxy without the flag; no token, or an owner device while
+  plex.tv is down, is hidden, and settles once plex.tv answers, then stays settled through a failed fetch; a shared
+  user dropped from a later list stays hidden; a suddenly empty list isn't trusted at once; the tune of 99 by
+  identifier or number gets 404, never reaches PMS and doesn't block the user, while channel 2 and the owner's and
+  owner device's 99 pass; a tune of 99 nested in a transcode's path or a play queue's uri (query, form or JSON body),
+  escaped once or twice, gets 404 too; an identifier from the DVR channel map, at startup and lazily, with the map
+  cached; a guide identifier hides the tuner's channel (Tunarr's at once, another once the map pairs it) and an owner
+  device in use stays remembered past 24 hours; the preview header works for the owner token only and never reaches
+  PMS; off by default; a response without 99 is byte-identical; an empty body is skipped; an unknown shape naming 99
+  is flagged `leak_suspect`; debug counts without changing; no raw token in any test's logs.
   `cmd_plex_label_proxy_test.go`: the flag repeats and splits commas.
 - **Upstream:** not sent.
 
