@@ -83,8 +83,8 @@ Newest first.
     (the owner's own apps); a token on a share list is a shared user's for good. Tokens are remembered 24 hours
     after they were last seen, 1000 at most. Unsettled callers and requests without a token get the shared view,
     after waiting up to 2 seconds for a share-list fetch. `liveviewers.go`'s tracker does this (`classify`); it's
-    created for either feature, and only a successful fetch settles anyone. A share list that's suddenly empty
-    isn't trusted until a second one agrees.
+    created for either feature, and only a successful fetch settles anyone. An empty share list that's the
+    first or follows a non-empty one isn't trusted until a second one agrees.
   - Checking it: `plexlabelproxy_hide: outcome=removed|leak_suspect|unparsed` lines and `hidden_removed=`,
     `hidden_refused=`, `hidden_leak_suspect=` in the summary; `-hide-live-channel-debug` logs `outcome=owner_kept
     present=<n>` for the owner's responses; the owner token with `X-Iptvtunerr-View-As: friend` gets the shared
@@ -97,7 +97,7 @@ Newest first.
   sizes, headers and Content-Length right, and a program on 2 and 99 keeps its channel-2 airing; the owner's and the
   owner's device's responses are byte-identical to the proxy without the flag; no token, or an owner device while
   plex.tv is down, is hidden, and settles once plex.tv answers, then stays settled through a failed fetch; a shared
-  user dropped from a later list stays hidden; a suddenly empty list isn't trusted at once; the tune of 99 by
+  user dropped from a later list stays hidden; a first or sudden empty list isn't trusted at once; the tune of 99 by
   identifier or number gets 404, never reaches PMS and doesn't block the user, while channel 2 and the owner's and
   owner device's 99 pass; a tune of 99 nested in a transcode's path or a play queue's uri (query, form or JSON body),
   escaped once or twice, gets 404 too; an identifier from the DVR channel map, at startup and lazily, with the map

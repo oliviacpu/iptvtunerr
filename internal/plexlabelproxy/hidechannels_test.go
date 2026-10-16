@@ -636,6 +636,32 @@ func TestLiveViewerTracker_ClassifyDistrustsASuddenlyEmptyShareList(t *testing.T
 	want("fp-new", t0.Add(21*time.Minute), viewerUnsettled, false)
 }
 
+func TestLiveViewerTracker_ClassifyDistrustsAFirstEmptyShareList(t *testing.T) {
+	tr := newLiveViewerTracker(func(context.Context) (shareList, error) {
+		return shareList{accounts: map[string]plexAccount{}, machineIdentifier: "m"}, nil
+	})
+	ctx := context.Background()
+	t0 := time.Unix(1_800_000_000, 0)
+	want := func(fp string, at time.Duration, wantClass viewerClass) {
+		t.Helper()
+		if c, _ := tr.classify(fp, t0.Add(at)); c != wantClass {
+			t.Fatalf("%s at +%s: %s, want %s", fp, at, c, wantClass)
+		}
+	}
+	// The proxy starts while plex.tv answers with nobody: a shared user's
+	// token, absent from it, isn't taken for the owner's.
+	want("fp-shared", 0, viewerUnsettled)
+	_ = tr.refreshAccounts(ctx, t0.Add(time.Second))
+	want("fp-shared", 2*time.Second, viewerUnsettled)
+	// It's asked again after the retry delay; a second empty list is
+	// believed, and later empty lists are too.
+	_ = tr.refreshAccounts(ctx, t0.Add(accountsRetry+time.Second))
+	want("fp-shared", accountsRetry+2*time.Second, viewerOwnerDevice)
+	want("fp-later", 3*accountsRetry, viewerUnsettled)
+	_ = tr.refreshAccounts(ctx, t0.Add(3*accountsRetry+time.Second))
+	want("fp-later", 3*accountsRetry+2*time.Second, viewerOwnerDevice)
+}
+
 func TestLiveViewerTracker_ClassifyBoundsWhatItRemembers(t *testing.T) {
 	tr := newLiveViewerTracker(func(context.Context) (shareList, error) { return shareList{}, nil })
 	t0 := time.Unix(1_800_000_000, 0)

@@ -91,8 +91,8 @@ type liveViewerTracker struct {
 	// of the owner's devices. seen is when a token was first classified, and
 	// last classified (which keeps it remembered).
 	// classifiedAt is when the last share list trusted for classification was
-	// fetched (its start); a list that comes back empty right after a non-empty
-	// one isn't trusted until a second one agrees (emptyOnce).
+	// fetched (its start); an empty list that's the first, or follows a
+	// non-empty one, isn't trusted until a second one agrees (emptyOnce).
 	friends      map[string]time.Time
 	seen         map[string]tokenSeen
 	classifiedAt time.Time
@@ -235,23 +235,23 @@ func (t *liveViewerTracker) refreshAccounts(ctx context.Context, now time.Time) 
 		}
 		return nil
 	}
-	// An empty share list that isn't trusted yet is asked again soon.
-	missing := t.emptyOnce
+	missing := false
 	for _, e := range t.clients {
 		if _, ok := t.accounts[e.tokenFP]; !ok && e.since.After(t.fetchedAt) {
 			missing = true
 			break
 		}
 	}
-	// A token classify hasn't settled yet (first seen since the last fetch)
-	// needs a fresh list too.
+	// A token classify hasn't settled yet (first seen since the last list it
+	// trusted, which an empty list it doesn't trust yet leaves behind) needs a
+	// fresh list too.
 	for fp, seen := range t.seen {
 		if missing {
 			break
 		}
 		_, shared := t.accounts[fp]
 		_, friend := t.friends[fp]
-		if !shared && !friend && seen.first.After(t.fetchedAt) {
+		if !shared && !friend && (t.classifiedAt.IsZero() || seen.first.After(t.classifiedAt)) {
 			missing = true
 		}
 	}
@@ -278,10 +278,12 @@ func (t *liveViewerTracker) refreshAccounts(ctx context.Context, now time.Time) 
 			t.friends[fp] = now
 		}
 		t.pruneTokensLocked(now)
-		// A list that's suddenly empty may be plex.tv misbehaving: trusting it
-		// would make every newly seen friend look like an owner device. A
-		// second empty list in a row is believed (everyone was unshared).
-		if len(list.accounts) == 0 && t.lastListSize > 0 && !t.emptyOnce {
+		// An empty list, the first one or right after a non-empty one, may be
+		// plex.tv misbehaving: trusting it would make every newly seen friend
+		// look like an owner device. A second empty list in a row is believed
+		// (nobody is shared with, or everyone was unshared).
+		firstOrSudden := t.classifiedAt.IsZero() || t.lastListSize > 0
+		if len(list.accounts) == 0 && firstOrSudden && !t.emptyOnce {
 			t.emptyOnce = true
 		} else {
 			t.emptyOnce = false
