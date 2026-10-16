@@ -448,13 +448,13 @@ iptv-tunerr plex-label-proxy -elevate-live-tv -hide-live-channel=99 ...
 
 - Name a channel by its number (`99`) or by its guide identifier
   (`C99.114.tunarr.com`). Repeat the flag or separate values with commas. A
-  number also covers Tunarr's identifier for it (and Tunarr's identifier its
-  number), and the DVR's channel map (`/livetv/dvrs`, read at startup and then
-  at most once a minute when a request names an unknown channel, or while a
-  configured identifier has no number yet) resolves it for other guides. The
-  tuner's channel list names channels by number only, so prefer the number: an
-  identifier from another guide hides the tuner's entry only once Plex's
-  channel map pairs it with one. The startup
+  number hides that number on every DVR; it also covers Tunarr's identifier
+  for it, and the DVR's channel map (`/livetv/dvrs`, read at startup and then
+  at most once a minute when a request names an unknown channel) resolves it
+  for other guides. An identifier hides that channel only. The tuner's channel
+  list names channels by number only, so an identifier's tuner entry is hidden
+  once the channel map pairs it with its device's channel (the map is reread,
+  at most once a minute, until it does). The startup
   log names what is hidden and whether Plex's channel map has it yet:
   `plex-label-proxy: hiding Live TV channel(s) from shared users: 99
   (C99.114.tunarr.com; in Plex's channel map)`.

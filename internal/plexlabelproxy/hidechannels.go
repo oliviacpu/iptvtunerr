@@ -55,30 +55,35 @@ var liveTVChannelPathRE = regexp.MustCompile(`^/livetv/dvrs/[^/]+/channels/([^/]
 
 // hiddenChannels matches the entries of hidden channels in Plex responses.
 // A channel is named by its number (the guide's vcn, the channel mapping's
-// lineup and device identifiers) or by its identifier (the XMLTV channel id,
-// e.g. C99.114.tunarr.com). Numbers resolve to identifiers through the DVR
-// channel map, and both are learned from the responses that pass through.
+// lineup and device identifiers), which hides that number on every DVR, or by
+// its identifier (the XMLTV channel id, e.g. C99.114.tunarr.com), which hides
+// that channel only. A number's identifiers come from Tunarr's pattern, the
+// DVR channel map and the responses that pass through.
 type hiddenChannels struct {
 	configured []string
 	fetchMap   func(ctx context.Context) ([]channelMapping, error)
 
 	mu sync.Mutex
-	// numbers and idents are the hidden channels' numbers and identifiers;
-	// plexIDs Plex's internal channel ids (Media channelID, the Channel tag
-	// id on an item); titles the "<vcn> <callSign>" channel titles that
-	// Channel tags carry.
+	// numbers are the configured hidden numbers; idents the hidden channels'
+	// identifiers; plexIDs Plex's internal channel ids (Media channelID, the
+	// Channel tag id on an item); titles the "<vcn> <callSign>" channel
+	// titles, for Channel tags without an id and the leak check.
 	numbers, idents, plexIDs, titles map[string]bool
-	// unpaired holds configured identifiers whose channel number isn't known
-	// yet: the tuner's channel list names channels by number only, so until
-	// the DVR channel map (or a response) pairs them, it's refetched before
-	// filtering.
+	// tunerChannels holds "<device>\x00<tuner channel>" for a hidden
+	// identifier's tuner channel, as the DVR channel map pairs them: the
+	// tuner's channel list names channels by number only, and the same number
+	// may be another channel on another device.
+	tunerChannels map[string]bool
+	// unpaired holds configured identifiers the DVR channel map hasn't paired
+	// with a tuner channel yet; while there are any, the map is refetched (at
+	// most every hiddenMapMaxAge) before filtering.
 	unpaired    map[string]bool
 	mapTriedAt  time.Time
 	mapResolved bool
 }
 
 type channelMapping struct {
-	key, deviceID, lineupID string
+	device, key, deviceID, lineupID string
 }
 
 // parseHiddenChannelValues splits the -hide-live-channel values (repeated or
@@ -100,25 +105,22 @@ func parseHiddenChannelValues(values []string) []string {
 
 func newHiddenChannels(values []string, fetchMap func(ctx context.Context) ([]channelMapping, error)) *hiddenChannels {
 	h := &hiddenChannels{
-		configured: values,
-		fetchMap:   fetchMap,
-		numbers:    map[string]bool{},
-		idents:     map[string]bool{},
-		plexIDs:    map[string]bool{},
-		titles:     map[string]bool{},
-		unpaired:   map[string]bool{},
+		configured:    values,
+		fetchMap:      fetchMap,
+		numbers:       map[string]bool{},
+		idents:        map[string]bool{},
+		plexIDs:       map[string]bool{},
+		titles:        map[string]bool{},
+		tunerChannels: map[string]bool{},
+		unpaired:      map[string]bool{},
 	}
 	for _, v := range values {
-		switch {
-		case isChannelNumber(v):
+		if isChannelNumber(v) {
 			h.numbers[v] = true
 			// Tunarr's XMLTV id for a channel number, which is what Plex keys
 			// the channel by: known before the channel map lists it.
 			addNonEmpty(h.idents, tunarrChannelID(v))
-		case tunarrChannelNumber(v) != "":
-			h.idents[v] = true
-			h.numbers[tunarrChannelNumber(v)] = true
-		default:
+		} else {
 			h.idents[v] = true
 			h.unpaired[v] = true
 		}
@@ -153,30 +155,8 @@ func tunarrChannelID(number string) string {
 	return fmt.Sprintf("C%s.%d.tunarr.com", number, sum)
 }
 
-var tunarrChannelIDRE = regexp.MustCompile(`^C([1-9][0-9]*)\.[0-9]+\.tunarr\.com$`)
-
-// tunarrChannelNumber is the channel number in a Tunarr XMLTV id, or "" when
-// ident isn't one.
-func tunarrChannelNumber(ident string) string {
-	m := tunarrChannelIDRE.FindStringSubmatch(ident)
-	if m == nil || tunarrChannelID(m[1]) != ident {
-		return ""
-	}
-	return m[1]
-}
-
-// pairLocked notes that ident's channel number is known (any of numbers).
-func (h *hiddenChannels) pairLocked(ident string, numbers ...string) {
-	for _, n := range numbers {
-		if strings.TrimSpace(n) != "" {
-			delete(h.unpaired, ident)
-			return
-		}
-	}
-}
-
-// needsMap reports whether a configured identifier still lacks its channel
-// number, so the DVR channel map should be (re)read before filtering.
+// needsMap reports whether a configured identifier still lacks its tuner
+// channel, so the DVR channel map should be (re)read before filtering.
 func (h *hiddenChannels) needsMap() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -192,7 +172,8 @@ func addNonEmpty(m map[string]bool, values ...string) {
 }
 
 // refreshMap refetches the DVR channel map when it's older than
-// hiddenMapMaxAge, so a hidden number resolves to the identifier Plex uses.
+// hiddenMapMaxAge: a hidden number's identifiers on every DVR, and a hidden
+// identifier's tuner channel on its device.
 func (h *hiddenChannels) refreshMap(ctx context.Context) {
 	h.mu.Lock()
 	if h.fetchMap == nil || (!h.mapTriedAt.IsZero() && time.Since(h.mapTriedAt) < hiddenMapMaxAge) {
@@ -208,10 +189,15 @@ func (h *hiddenChannels) refreshMap(ctx context.Context) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for _, m := range mappings {
-		if h.numbers[m.lineupID] || h.numbers[m.deviceID] || h.idents[m.key] {
+		switch {
+		case h.numbers[m.lineupID] || h.numbers[m.deviceID]:
 			addNonEmpty(h.idents, m.key)
-			addNonEmpty(h.numbers, m.lineupID, m.deviceID)
-			h.pairLocked(m.key, m.lineupID, m.deviceID)
+			h.mapResolved = true
+		case h.idents[m.key]:
+			if m.deviceID != "" {
+				h.tunerChannels[m.device+"\x00"+m.deviceID] = true
+				delete(h.unpaired, m.key)
+			}
 			h.mapResolved = true
 		}
 	}
@@ -242,9 +228,11 @@ func (h *hiddenChannels) channelHidden(id string) bool {
 
 // entryHidden reports whether one entry (a JSON object or XML element named
 // name, with fields read by get) belongs to a hidden channel, learning the
-// channel's other names from it when it does. Only the fields that name a
-// channel are compared, never titles of programs.
-func (h *hiddenChannels) entryHidden(name string, get func(string) string) bool {
+// channel's other names from it when it does. device is the tuner device a
+// response lists the channels of (/media/grabbers/devices/<device>/channels),
+// "" elsewhere. Only the fields that name a channel are compared, never
+// titles of programs.
+func (h *hiddenChannels) entryHidden(name, device string, get func(string) string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	switch name {
@@ -252,8 +240,6 @@ func (h *hiddenChannels) entryHidden(name string, get func(string) string) bool 
 		// An airing in the guide: the channel it airs on.
 		if h.idents[get("channelIdentifier")] || h.numbers[get("channelVcn")] {
 			addNonEmpty(h.idents, get("channelIdentifier"))
-			addNonEmpty(h.numbers, get("channelVcn"))
-			h.pairLocked(get("channelIdentifier"), get("channelVcn"))
 			addNonEmpty(h.plexIDs, get("channelID"))
 			addNonEmpty(h.titles, get("channelTitle"))
 			return true
@@ -262,28 +248,26 @@ func (h *hiddenChannels) entryHidden(name string, get func(string) string) bool 
 		// /livetv/dvrs: the DVR's mapping of tuner channels to guide channels.
 		if h.idents[get("channelKey")] || h.numbers[get("lineupIdentifier")] || h.numbers[get("deviceIdentifier")] {
 			addNonEmpty(h.idents, get("channelKey"))
-			addNonEmpty(h.numbers, get("lineupIdentifier"), get("deviceIdentifier"))
-			h.pairLocked(get("channelKey"), get("lineupIdentifier"), get("deviceIdentifier"))
 			return true
 		}
 	case "DeviceChannel":
-		// /media/grabbers/devices/<n>/channels: the tuner's channels.
-		return h.numbers[get("identifier")]
+		// /media/grabbers/devices/<device>/channels: the tuner's channels.
+		id := get("identifier")
+		return h.numbers[id] || (device != "" && h.tunerChannels[device+"\x00"+id])
 	case "Channel":
 		if get("filter") != "" || (get("tag") != "" && get("vcn") == "" && get("gridKey") == "") {
-			// A Channel tag on a program: id is Plex's internal channel id,
-			// tag the channel title.
-			return h.plexIDs[get("id")] || h.titles[get("tag")]
+			// A Channel tag on a program: id is Plex's internal channel id
+			// (learned from the airings), tag the channel title.
+			if id := get("id"); id != "" {
+				return h.plexIDs[id]
+			}
+			return h.titles[get("tag")]
 		}
 		// A lineup channel (lineups/dvr/channels, epg lineupchannels).
 		if h.idents[get("id")] || h.idents[get("gridKey")] || h.idents[get("key")] || h.idents[get("identifier")] ||
 			h.numbers[get("vcn")] || h.numbers[get("channelVcn")] || h.numbers[get("identifier")] {
 			addNonEmpty(h.idents, get("id"), get("gridKey"), get("key"))
 			if vcn := firstNonEmpty(get("vcn"), get("channelVcn")); vcn != "" {
-				h.numbers[vcn] = true
-				for _, k := range []string{"id", "gridKey", "key"} {
-					h.pairLocked(get(k), vcn)
-				}
 				if cs := get("callSign"); cs != "" {
 					h.titles[vcn+" "+cs] = true
 				}
@@ -316,6 +300,8 @@ func (h *hiddenChannels) leakIn(body []byte) string {
 // hideRun filters one response body.
 type hideRun struct {
 	h *hiddenChannels
+	// device is the tuner device whose channels the response lists, if any.
+	device string
 	// removed counts every entry removed; rootRemoved the root container's
 	// direct children removed (for X-Plex-Container-Total-Size).
 	removed, rootRemoved int
@@ -426,7 +412,7 @@ func (r *hideRun) filterChildrenJSON(obj map[string]any) int {
 // is a hidden channel's entry, or a program left with no airings, or a search
 // result left without its program.
 func (r *hideRun) dropJSON(name string, el map[string]any) bool {
-	if r.h.entryHidden(name, func(k string) string { return jsonString(el[k]) }) {
+	if r.h.entryHidden(name, r.device, func(k string) string { return jsonString(el[k]) }) {
 		r.count()
 		return true
 	}
@@ -615,7 +601,7 @@ func (r *hideRun) filterChildrenXML(n *xmlNode) int {
 
 func (r *hideRun) dropXML(e *xmlNode) bool {
 	name := e.start.Name.Local
-	if r.h.entryHidden(name, e.attr) {
+	if r.h.entryHidden(name, r.device, e.attr) {
 		r.count()
 		return true
 	}
@@ -635,6 +621,16 @@ func (r *hideRun) dropXML(e *xmlNode) bool {
 		return true
 	}
 	return false
+}
+
+var tunerChannelsPathRE = regexp.MustCompile(`^/media/grabbers/devices/([^/]+)/channels/?$`)
+
+// tunerDevice is the device whose channels path lists, or "".
+func tunerDevice(path string) string {
+	if m := tunerChannelsPathRE.FindStringSubmatch(path); m != nil {
+		return m[1]
+	}
+	return ""
 }
 
 // hidePathCandidate reports whether a response on path can list channels:
@@ -913,7 +909,7 @@ func (p *Proxy) hideLiveChannelEntries(resp *http.Response) error {
 
 	if class.seesHiddenChannels() {
 		// Debug: count what a shared user wouldn't see, change nothing.
-		run := &hideRun{h: p.hidden, countOnly: true}
+		run := &hideRun{h: p.hidden, device: tunerDevice(path), countOnly: true}
 		if isJSON {
 			_, _, _ = run.filterJSON(body)
 		} else if looksLikeXML(body) {
@@ -929,7 +925,7 @@ func (p *Proxy) hideLiveChannelEntries(resp *http.Response) error {
 			// The tuner's channels are named by number only.
 			p.hidden.refreshMap(resp.Request.Context())
 		}
-		run := &hideRun{h: p.hidden}
+		run := &hideRun{h: p.hidden, device: tunerDevice(path)}
 		var filtered []byte
 		var changed bool
 		var ferr error
@@ -994,6 +990,7 @@ func dvrChannelMapFetcher(upstream *url.URL, token string, transport http.RoundT
 		var doc struct {
 			Dvr []struct {
 				Device []struct {
+					Key            string `xml:"key,attr"`
 					ChannelMapping []struct {
 						ChannelKey       string `xml:"channelKey,attr"`
 						DeviceIdentifier string `xml:"deviceIdentifier,attr"`
@@ -1009,7 +1006,7 @@ func dvrChannelMapFetcher(upstream *url.URL, token string, transport http.RoundT
 		for _, d := range doc.Dvr {
 			for _, dev := range d.Device {
 				for _, m := range dev.ChannelMapping {
-					out = append(out, channelMapping{key: m.ChannelKey, deviceID: m.DeviceIdentifier, lineupID: m.LineupIdentifier})
+					out = append(out, channelMapping{device: dev.Key, key: m.ChannelKey, deviceID: m.DeviceIdentifier, lineupID: m.LineupIdentifier})
 				}
 			}
 		}

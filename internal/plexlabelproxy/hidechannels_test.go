@@ -42,6 +42,7 @@ var hideFixturePaths = map[string]string{
 	hideProvider + "/sections/1/all":       "sections_all",
 	"/livetv/dvrs":                         "livetv_dvrs",
 	"/media/grabbers/devices/1/channels":   "device_channels",
+	"/media/grabbers/devices/2/channels":   "device_channels",
 }
 
 // hideFixture is a PMS answering with the fixtures (JSON when asked for, XML
@@ -701,19 +702,18 @@ func TestLiveViewerTracker_ClassifyKeepsAnActiveOwnerDevice(t *testing.T) {
 }
 
 func TestHideLiveChannel_HidesTheTunerChannelOfAGuideIdentifier(t *testing.T) {
-	deviceChannels := func(t *testing.T, p *Proxy) containerSummary {
+	deviceChannels := func(t *testing.T, p *Proxy, device string) containerSummary {
 		t.Helper()
-		return summarizeContainer(t, hideBody(t, hideServe(p, http.MethodGet, "/media/grabbers/devices/1/channels", "friend-token", "json")), "json")
+		return summarizeContainer(t, hideBody(t, hideServe(p, http.MethodGet, "/media/grabbers/devices/"+device+"/channels", "friend-token", "json")), "json")
 	}
-	t.Run("tunarr identifier without the channel map", func(t *testing.T) {
+	t.Run("tunarr identifier", func(t *testing.T) {
 		f := newHideFixture(t)
-		f.dvrsDown.Store(true)
 		p := f.proxy(t, func(c *Config) { c.HideLiveChannels = []string{hiddenIdent} })
-		if s := deviceChannels(t, p); s.entries["DeviceChannel"] != 2 || s.size != "2" {
+		if s := deviceChannels(t, p, "1"); s.entries["DeviceChannel"] != 2 || s.size != "2" {
 			t.Errorf("tuner channels %+v, want 99's removed", s)
 		}
 	})
-	t.Run("other identifier once the channel map pairs it", func(t *testing.T) {
+	t.Run("once the channel map pairs it", func(t *testing.T) {
 		f := newHideFixture(t)
 		f.mu.Lock()
 		f.dvrsXML = `<MediaContainer size="1"><Dvr key="4"><Device key="1">
@@ -730,7 +730,7 @@ func TestHideLiveChannel_HidesTheTunerChannelOfAGuideIdentifier(t *testing.T) {
 		p.hidden.mu.Lock()
 		p.hidden.mapTriedAt = time.Now().Add(-2 * hiddenMapMaxAge)
 		p.hidden.mu.Unlock()
-		if s := deviceChannels(t, p); s.entries["DeviceChannel"] != 2 || s.size != "2" {
+		if s := deviceChannels(t, p, "1"); s.entries["DeviceChannel"] != 2 || s.size != "2" {
 			t.Errorf("tuner channels %+v, want 99's removed", s)
 		}
 		// Paired, the map isn't fetched for every response.
@@ -738,9 +738,38 @@ func TestHideLiveChannel_HidesTheTunerChannelOfAGuideIdentifier(t *testing.T) {
 		p.hidden.mu.Lock()
 		p.hidden.mapTriedAt = time.Now().Add(-2 * hiddenMapMaxAge)
 		p.hidden.mu.Unlock()
-		deviceChannels(t, p)
+		deviceChannels(t, p, "1")
 		if n := f.callsTo("/livetv/dvrs"); n != calls {
 			t.Errorf("channel map fetched again (%d -> %d) once paired", calls, n)
+		}
+	})
+	t.Run("only on its own device", func(t *testing.T) {
+		// Two DVRs whose tuners both have a channel 99; only the first's is
+		// hidden.
+		f := newHideFixture(t)
+		f.mu.Lock()
+		f.dvrsXML = `<MediaContainer size="2">
+<Dvr key="4"><Device key="1"><ChannelMapping channelKey="example-99" deviceIdentifier="99" enabled="1" lineupIdentifier="99"/></Device></Dvr>
+<Dvr key="5"><Device key="2"><ChannelMapping channelKey="other-99" deviceIdentifier="99" enabled="1" lineupIdentifier="99"/></Device></Dvr>
+</MediaContainer>`
+		f.mu.Unlock()
+		p := f.proxy(t, func(c *Config) { c.HideLiveChannels = []string{"example-99"} })
+		p.HiddenLiveChannels(context.Background())
+		if s := deviceChannels(t, p, "1"); s.entries["DeviceChannel"] != 2 {
+			t.Errorf("device 1's channels %+v, want 99's removed", s)
+		}
+		if s := deviceChannels(t, p, "2"); s.entries["DeviceChannel"] != 3 {
+			t.Errorf("device 2's channels %+v, want all kept", s)
+		}
+		dvrs := hideBody(t, hideServe(p, http.MethodGet, "/livetv/dvrs", "friend-token", "xml"))
+		if bytes.Contains(dvrs, []byte("example-99")) || !bytes.Contains(dvrs, []byte("other-99")) {
+			t.Errorf("DVR mappings:\n%s", dvrs)
+		}
+		if rec := hideServe(p, http.MethodPost, "/livetv/dvrs/5/channels/other-99/tune", "friend-token", "xml"); rec.Code != http.StatusOK {
+			t.Errorf("tuning the other DVR's 99: status %d", rec.Code)
+		}
+		if rec := hideServe(p, http.MethodPost, "/livetv/dvrs/4/channels/example-99/tune", "friend-token", "xml"); rec.Code != http.StatusNotFound {
+			t.Errorf("tuning the hidden channel: status %d", rec.Code)
 		}
 	})
 }
@@ -1033,14 +1062,6 @@ func TestTunarrChannelID(t *testing.T) {
 	} {
 		if got := tunarrChannelID(number); got != want {
 			t.Errorf("tunarrChannelID(%q) = %q, want %q", number, got, want)
-		}
-		if want != "" && tunarrChannelNumber(want) != number {
-			t.Errorf("tunarrChannelNumber(%q) = %q, want %q", want, tunarrChannelNumber(want), number)
-		}
-	}
-	for _, ident := range []string{"C99.115.tunarr.com", "C099.162.tunarr.com", "C99.114.tunarr.com.example.invalid", "example-99"} {
-		if n := tunarrChannelNumber(ident); n != "" {
-			t.Errorf("tunarrChannelNumber(%q) = %q, want none", ident, n)
 		}
 	}
 }
