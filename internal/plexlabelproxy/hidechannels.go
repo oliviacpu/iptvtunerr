@@ -749,21 +749,18 @@ func (p *Proxy) refuseHiddenChannel(w http.ResponseWriter, r *http.Request) bool
 	if len(ids) == 0 {
 		return false
 	}
-	anyHidden := func() bool {
-		for _, id := range ids {
-			if p.hidden.channelHidden(id) {
-				return true
-			}
+	// The DVR channel map may name a channel Tunarr's pattern didn't
+	// predict, or have moved one: reread it when it's over a minute old.
+	p.hidden.refreshMap(r.Context())
+	anyHidden := false
+	for _, id := range ids {
+		if p.hidden.channelHidden(id) {
+			anyHidden = true
+			break
 		}
-		return false
 	}
-	if !anyHidden() {
-		// A channel identifier Tunarr's pattern didn't predict: the DVR
-		// channel map may name it (refetched at most every minute).
-		p.hidden.refreshMap(r.Context())
-		if !anyHidden() {
-			return false
-		}
+	if !anyHidden {
+		return false
 	}
 	token := inboundPlexToken(r)
 	class := p.classifyCaller(r.Context(), token)

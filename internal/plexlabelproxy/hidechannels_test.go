@@ -906,11 +906,13 @@ func TestHideLiveChannel_FollowsANumberPlexMovedToAnotherChannel(t *testing.T) {
 	p.hidden.mu.Lock()
 	p.hidden.mapTriedAt = time.Now().Add(-2 * hiddenMapMaxAge)
 	p.hidden.mu.Unlock()
-	if code := tune("example-b"); code != http.StatusNotFound {
-		t.Errorf("tuning 99 (example-b): status %d", code)
-	}
+	// The old identifier is asked about first: the stale map is reread
+	// before it's judged.
 	if code := tune("example-a"); code != http.StatusOK {
 		t.Errorf("tuning 98 (example-a, 99's old identifier): status %d", code)
+	}
+	if code := tune("example-b"); code != http.StatusNotFound {
+		t.Errorf("tuning 99 (example-b): status %d", code)
 	}
 }
 
