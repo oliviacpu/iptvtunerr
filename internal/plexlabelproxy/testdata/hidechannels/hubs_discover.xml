@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<MediaContainer size="1" identifier="tv.plex.providers.epg.xmltv">
+<MediaContainer size="2" identifier="tv.plex.providers.epg.xmltv">
 <Hub hubKey="/tv.plex.providers.epg.xmltv:4/metadata/1,2" key="/tv.plex.providers.epg.xmltv:4/all?type=1,4" title="Shows On Now" type="mixed" hubIdentifier="today.onrightnow" size="2" more="false">
 <Video ratingKey="tv.example.invalid/b" key="/tv.plex.providers.epg.xmltv:4/metadata/b" type="episode" title="Only On Test" grandparentTitle="Example Show" duration="1800000">
 <Media id="107" duration="1800000" audioChannels="2" videoResolution="480" channelCallSign="99 Test" channelIdentifier="C99.114.tunarr.com" channelThumb="https://example.invalid/ch99.png" channelTitle="99 99 Test" channelVcn="99" protocol="livetv" beginsAt="1700000000" endsAt="1700001800" channelID="7">
@@ -13,5 +13,19 @@
 <Image alt="On Cartoons" type="coverPoster" url="https://example.invalid/poster.jpg" />
 <Channel id="3" filter="channel=3" tag="1 1 Cartoons" />
 </Video>
+</Hub>
+<Hub key="/tv.plex.providers.epg.xmltv:4/hubs/channels/recent" title="Recent Channels" type="channels" hubIdentifier="recent.channels" context="hub.recent.channels" size="2" more="false" style="shelf" promoted="true">
+<Directory identifier="2" key="C2.50.tunarr.com" channelVcn="2" thumb="https://example.invalid/ch2.png" title="2 2 Science" callSign="2 Science" type="channel">
+<Video ratingKey="tv.example.invalid/a" key="/tv.plex.providers.epg.xmltv:4/metadata/a" type="episode" title="On Science" grandparentTitle="Example Show" duration="1800000">
+<Media id="101" duration="1800000" audioChannels="2" videoResolution="480" channelCallSign="2 Science" channelIdentifier="C2.50.tunarr.com" channelThumb="https://example.invalid/ch2.png" channelTitle="2 2 Science" channelVcn="2" protocol="livetv" beginsAt="1700000000" endsAt="1700001800" channelID="1">
+</Media>
+</Video>
+</Directory>
+<Directory identifier="99" key="C99.114.tunarr.com" channelVcn="99" thumb="https://example.invalid/ch99.png" title="99 99 Test" callSign="99 Test" type="channel">
+<Video ratingKey="tv.example.invalid/b" key="/tv.plex.providers.epg.xmltv:4/metadata/b" type="episode" title="Only On Test" grandparentTitle="Example Show" duration="1800000">
+<Media id="107" duration="1800000" audioChannels="2" videoResolution="480" channelCallSign="99 Test" channelIdentifier="C99.114.tunarr.com" channelThumb="https://example.invalid/ch99.png" channelTitle="99 99 Test" channelVcn="99" protocol="livetv" beginsAt="1700000000" endsAt="1700001800" channelID="7">
+</Media>
+</Video>
+</Directory>
 </Hub>
 </MediaContainer>

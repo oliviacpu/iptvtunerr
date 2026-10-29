@@ -60,6 +60,43 @@ Newest first.
 - **Upstream:** not sent / issue or PR link.
 -->
 
+### A hidden channel stays off the Recent Channels shelf and out of Media-less airings (2026-10-29)
+
+- **What it fixes:** with `-hide-live-channel=99`, a shared user's Live TV home still listed channel 99:
+  - its title and logo on the "Recent Channels" shelf of `/hubs/discover?includeRecentChannels=1` (what the Apple TV
+    asks for when Live TV opens), with `plexlabelproxy_hide: outcome=leak_suspect match="C99.114.tunarr.com"` logged
+    for every such response;
+  - its programs in "Shows On Now" when the request carried `excludeElements=Media` (Plex clients may send it on hub
+    and guide requests).
+- **Cause:**
+  - The shelf lists each channel as a `Directory` of `type="channel"` (`identifier` the channel number, `key` its
+    guide identifier) holding the program on now. `entryHidden` had no case for it, so the walk only dropped the
+    program's airing (and then the program) inside it and kept the channel's entry.
+  - An airing is placed on a channel by its `Media`. Without it, nothing in the airing names a channel, so the filter
+    kept it.
+- **Fix:** `hidechannels.go`:
+  - A `Directory` of `type="channel"` is a hidden channel's entry when its `key` or `identifier` is a hidden
+    identifier, or its `channelVcn` or `identifier` a hidden number, in JSON and XML. Its `<vcn> <callSign>` title
+    joins the titles the response's `Channel` tags and leak check use, as a lineup `Channel`'s does, and the hub's
+    `size` drops to match.
+  - `noteHideCaller`, on the hidden paths, takes `Media` out of `excludeElements` for anyone who gets the shared view
+    (the owner's preview too): an `excludeElements` left empty, or one that can't be decoded, is dropped, and every
+    other parameter is kept as it was. PMS then returns the airings' `Media` and the filter judges them as usual; the
+    client gets an element it asked to omit. The caller is classified on the request then (only when `excludeElements`
+    names `Media`), and its response is judged for that class. The owner's and the owner's devices' requests are
+    unchanged.
+  - **Docs:** the runbook's "Hide channels from shared users".
+- **Test:** `hidechannels_test.go` over `testdata/hidechannels/hubs_discover.json` and `.xml`, now with a Recent
+  Channels hub holding channels 2 and 99: a shared user gets channel 2's entry only, with its program, and the hub's
+  size lowered, with no `leak_suspect` line; the owner and the owner's device get both entries. The fixture PMS now
+  honours `excludeElements=Media`. A shared user's, a tokenless request's and the owner's preview's discover requests
+  reach it without `Media` in `excludeElements` (`Media,Director` as `Director`, `Media` alone as no parameter), the
+  other parameters kept; the owner's and the owner's device's reach it unchanged. A shared user asking for discover
+  with `excludeElements=Media` gets no airing of 99 and no `leak_suspect` line, while the owner's device gets no
+  `Media`. `TestWithoutExcludedMedia` covers the query rewrite (order and escaping kept, case, repeats, an
+  undecodable value).
+- **Upstream:** not sent.
+
 ### Hide a Live TV channel from shared users: `-hide-live-channel` (2026-10-16)
 
 - **What it fixes:** the owner wants a test channel in Plex's Live TV that shared users don't see or tune. Plex has
