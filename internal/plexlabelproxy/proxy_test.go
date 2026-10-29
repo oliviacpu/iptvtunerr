@@ -527,11 +527,13 @@ func TestProxy_TemporarilyBlocksRepeatedBadElevationAttempts(t *testing.T) {
 }
 
 func TestProxy_BadSourceBlockDoesNotBlockAuthorizedToken(t *testing.T) {
-	var gotToken string
-	var upstreamHits int
+	var tokens []string
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		upstreamHits++
-		gotToken = r.URL.Query().Get("X-Plex-Token")
+		token := r.URL.Query().Get("X-Plex-Token")
+		if token == "" {
+			token = r.Header.Get("X-Plex-Token")
+		}
+		tokens = append(tokens, token)
 		w.Header().Set("Content-Type", "application/xml")
 		_, _ = w.Write([]byte(`<MediaContainer allowTuners="0"/>`))
 	}))
@@ -571,11 +573,9 @@ func TestProxy_BadSourceBlockDoesNotBlockAuthorizedToken(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("authorized request status=%d want 200", rec.Code)
 	}
-	if gotToken != "owner-token" {
-		t.Fatalf("authorized token should be elevated, got %q", gotToken)
-	}
-	if upstreamHits != 3 {
-		t.Fatalf("authorized request should reach upstream; hits=%d", upstreamHits)
+	// The elevated request, then the shared user's own /media/providers.
+	if len(tokens) != 4 || tokens[2] != "owner-token" || tokens[3] != "shared-user-token" {
+		t.Fatalf("authorized request should reach upstream elevated; tokens=%q", tokens)
 	}
 }
 
@@ -728,7 +728,8 @@ func TestProxy_ExternalSharedUserLiveTVIsElevatedAndAudited(t *testing.T) {
 	req.Header.Set("CF-Connecting-IP", "203.0.113.77")
 	proxy.ServeHTTP(httptest.NewRecorder(), req)
 
-	if len(requests) != 1 {
+	// The elevated request, then the shared user's own /media/providers.
+	if len(requests) != 2 {
 		t.Fatalf("requests=%d", len(requests))
 	}
 	got := requests[0]
@@ -737,6 +738,10 @@ func TestProxy_ExternalSharedUserLiveTVIsElevatedAndAudited(t *testing.T) {
 	}
 	if !strings.HasPrefix(got.forwarded, "127.0.0.1") || got.cfIP != "203.0.113.77" {
 		t.Fatalf("source headers should be preserved upstream for audit context, got %+v", got)
+	}
+	if own := requests[1]; own.queryToken != "" || own.headerToken != "shared-user-token" ||
+		own.forwarded != got.forwarded || own.cfIP != got.cfIP {
+		t.Fatalf("own provider list should be fetched as the user, from the same source, got %+v", own)
 	}
 	logged := logBuf.String()
 	for _, want := range []string{
@@ -1473,7 +1478,11 @@ func TestProxy_ElevateDiscoveryOnly_DoesNotElevateStreamStart(t *testing.T) {
 	}
 	var requests []seen
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests = append(requests, seen{r.URL.Path, r.URL.Query().Get("X-Plex-Token")})
+		token := r.URL.Query().Get("X-Plex-Token")
+		if token == "" {
+			token = r.Header.Get("X-Plex-Token")
+		}
+		requests = append(requests, seen{r.URL.Path, token})
 		w.Header().Set("Content-Type", "application/xml")
 		_, _ = w.Write([]byte(`<MediaContainer/>`))
 	}))
@@ -1494,8 +1503,8 @@ func TestProxy_ElevateDiscoveryOnly_DoesNotElevateStreamStart(t *testing.T) {
 		proxy.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
 	}
 
-	if len(requests) != 4 {
-		t.Fatalf("want 4 requests, got %d", len(requests))
+	if len(requests) != 5 {
+		t.Fatalf("want 5 requests, got %d", len(requests))
 	}
 	// Discovery paths must be elevated.
 	if requests[0].token != "owner-token" {
@@ -1504,12 +1513,16 @@ func TestProxy_ElevateDiscoveryOnly_DoesNotElevateStreamStart(t *testing.T) {
 	if requests[1].token != "owner-token" {
 		t.Fatalf("media/providers should be elevated, got token=%q", requests[1].token)
 	}
-	// Stream-start paths must NOT be elevated.
-	if requests[2].token != "user-token" {
-		t.Fatalf("transcode should NOT be elevated in discovery-only mode, got token=%q", requests[2].token)
+	// Then the user's own provider list, fetched as the user.
+	if requests[2].path != "/media/providers" || requests[2].token != "user-token" {
+		t.Fatalf("own media/providers should use the user token, got %+v", requests[2])
 	}
+	// Stream-start paths must NOT be elevated.
 	if requests[3].token != "user-token" {
-		t.Fatalf("playQueues should NOT be elevated in discovery-only mode, got token=%q", requests[3].token)
+		t.Fatalf("transcode should NOT be elevated in discovery-only mode, got token=%q", requests[3].token)
+	}
+	if requests[4].token != "user-token" {
+		t.Fatalf("playQueues should NOT be elevated in discovery-only mode, got token=%q", requests[4].token)
 	}
 }
 
