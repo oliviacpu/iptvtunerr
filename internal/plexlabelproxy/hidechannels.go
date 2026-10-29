@@ -34,6 +34,14 @@ import (
 // token missing from a share list fetched after it was first seen is one of
 // the owner's devices; anything not settled yet is treated like a shared user
 // (the channel stays hidden).
+//
+// An airing is placed on a channel by its Media. Plex clients may ask PMS to
+// leave Media out (excludeElements=Media on hub and guide requests), which
+// would leave a hidden channel's airings with nothing to judge them by. So
+// for anyone who gets the shared view, the proxy takes Media out of
+// excludeElements before asking PMS: the client gets an element it asked to
+// omit, and the hidden channels' airings are removed as usual. The owner's and
+// the owner's devices' requests go to PMS unchanged.
 
 // ViewAsHeader, set to "friend" on a request carrying the owner token, shows
 // the response the way a shared user would get it, so the hiding can be
@@ -691,10 +699,17 @@ type hideCtxKey struct{}
 type hideCtx struct {
 	callerToken  string
 	viewAsFriend bool
+	// class is who the caller is, when the request step had to know
+	// (classified): the response is judged for the caller its request was
+	// shaped for.
+	class      viewerClass
+	classified bool
 }
 
 // noteHideCaller records the caller on req for the response step, and strips
-// ViewAsHeader so PMS never sees it. Called by the Director.
+// ViewAsHeader so PMS never sees it. On the hidden paths, a request that gets
+// the shared view loses its cache validators and Media from excludeElements.
+// Called by the Director.
 func (p *Proxy) noteHideCaller(req *http.Request, originalToken string) {
 	viewAs := strings.EqualFold(strings.TrimSpace(req.Header.Get(ViewAsHeader)), "friend")
 	req.Header.Del(ViewAsHeader)
@@ -711,8 +726,65 @@ func (p *Proxy) noteHideCaller(req *http.Request, originalToken string) {
 		// response, so it's filtered.
 		req.Header.Del("If-None-Match")
 		req.Header.Del("If-Modified-Since")
+		// Without Media, nothing places an airing on a channel: ask PMS for
+		// it on the shared view.
+		if query, changed := withoutExcludedMedia(req.URL.RawQuery); changed {
+			hc.class, hc.classified = viewerPreview, true
+			if !hc.viewAsFriend {
+				hc.class = p.classifyCaller(req.Context(), hc.callerToken)
+			}
+			if !hc.class.seesHiddenChannels() {
+				req.URL.RawQuery = query
+			}
+		}
 	}
 	*req = *req.WithContext(context.WithValue(req.Context(), hideCtxKey{}, hc))
+}
+
+// withoutExcludedMedia is rawQuery with Media taken out of every
+// excludeElements value, dropping one left empty or one that can't be decoded
+// (it might name Media), and every other parameter as it was, in order.
+// changed reports whether anything was taken out.
+func withoutExcludedMedia(rawQuery string) (query string, changed bool) {
+	if rawQuery == "" {
+		return rawQuery, false
+	}
+	parts := strings.Split(rawQuery, "&")
+	kept := make([]string, 0, len(parts))
+	for _, part := range parts {
+		rawKey, rawValue, _ := strings.Cut(part, "=")
+		if key, err := url.QueryUnescape(rawKey); err != nil || !strings.EqualFold(key, "excludeElements") {
+			kept = append(kept, part)
+			continue
+		}
+		value, err := url.QueryUnescape(rawValue)
+		if err != nil {
+			changed = true
+			continue
+		}
+		var names []string
+		dropped := false
+		for _, name := range strings.Split(value, ",") {
+			switch name = strings.TrimSpace(name); {
+			case strings.EqualFold(name, "Media"):
+				dropped = true
+			case name != "":
+				names = append(names, url.QueryEscape(name))
+			}
+		}
+		if !dropped {
+			kept = append(kept, part)
+			continue
+		}
+		changed = true
+		if len(names) > 0 {
+			kept = append(kept, rawKey+"="+strings.Join(names, ","))
+		}
+	}
+	if !changed {
+		return rawQuery, false
+	}
+	return strings.Join(kept, "&"), true
 }
 
 func (p *Proxy) isOwnerToken(token string) bool {
@@ -926,7 +998,10 @@ func (p *Proxy) hideLiveChannelEntries(resp *http.Response) error {
 		return nil
 	}
 	hc, _ := resp.Request.Context().Value(hideCtxKey{}).(hideCtx)
-	class := p.classifyCaller(resp.Request.Context(), hc.callerToken)
+	class := hc.class
+	if !hc.classified {
+		class = p.classifyCaller(resp.Request.Context(), hc.callerToken)
+	}
 	if hc.viewAsFriend {
 		class = viewerPreview
 	}
