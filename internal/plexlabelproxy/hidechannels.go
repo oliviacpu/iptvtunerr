@@ -256,8 +256,8 @@ func (h *hiddenChannels) channelHidden(id string) bool {
 // entryHidden reports whether one entry (a JSON object or XML element named
 // name, with fields read by get) belongs to a hidden channel. Only the fields
 // that name a channel are compared, never titles of programs. A hidden
-// airing or lineup entry tells this response's Channel tags which Plex
-// channel ids and titles to drop.
+// airing, lineup channel or shelf channel tells this response's Channel tags
+// which Plex channel ids and titles to drop.
 func (r *hideRun) entryHidden(name string, get func(string) string) bool {
 	s := r.set
 	switch name {
@@ -266,6 +266,21 @@ func (r *hideRun) entryHidden(name string, get func(string) string) bool {
 		if s.idents[get("channelIdentifier")] || s.numbers[get("channelVcn")] {
 			addNonEmpty(r.plexIDs, get("channelID"))
 			addNonEmpty(r.titles, get("channelTitle"))
+			return true
+		}
+	case "Directory":
+		// A channel on a hub's shelf (hubs/discover's Recent Channels), with
+		// the program on now inside it: identifier is its number, key its
+		// guide identifier.
+		if get("type") != "channel" {
+			return false
+		}
+		if s.idents[get("key")] || s.idents[get("identifier")] || s.numbers[get("channelVcn")] || s.numbers[get("identifier")] {
+			if vcn := firstNonEmpty(get("channelVcn"), get("identifier")); vcn != "" {
+				if cs := get("callSign"); cs != "" {
+					r.titles[vcn+" "+cs] = true
+				}
+			}
 			return true
 		}
 	case "ChannelMapping":

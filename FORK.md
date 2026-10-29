@@ -60,6 +60,24 @@ Newest first.
 - **Upstream:** not sent / issue or PR link.
 -->
 
+### A hidden channel stays off the Recent Channels shelf (2026-10-29)
+
+- **What it fixes:** with `-hide-live-channel=99`, a shared user's Live TV home still listed channel 99, title and
+  logo, on the "Recent Channels" shelf of `/hubs/discover?includeRecentChannels=1` (what the Apple TV asks for when
+  Live TV opens), and the proxy logged `plexlabelproxy_hide: outcome=leak_suspect match="C99.114.tunarr.com"` for
+  every such response.
+- **Cause:** the shelf lists each channel as a `Directory` of `type="channel"` (`identifier` the channel number,
+  `key` its guide identifier) holding the program on now. `entryHidden` had no case for it, so the walk only dropped
+  the program's airing (and then the program) inside it and kept the channel's entry.
+- **Fix:** `hidechannels.go`: a `Directory` of `type="channel"` is a hidden channel's entry when its `key` or
+  `identifier` is a hidden identifier, or its `channelVcn` or `identifier` a hidden number, in JSON and XML. Its
+  `<vcn> <callSign>` title joins the titles the response's `Channel` tags and leak check use, as a lineup `Channel`'s
+  does, and the hub's `size` drops to match. **Docs:** the runbook's "Hide channels from shared users".
+- **Test:** `hidechannels_test.go` over `testdata/hidechannels/hubs_discover.json` and `.xml`, now with a Recent
+  Channels hub holding channels 2 and 99: a shared user gets channel 2's entry only, with its program, and the hub's
+  size lowered, with no `leak_suspect` line; the owner and the owner's device get both entries.
+- **Upstream:** not sent.
+
 ### Hide a Live TV channel from shared users: `-hide-live-channel` (2026-10-16)
 
 - **What it fixes:** the owner wants a test channel in Plex's Live TV that shared users don't see or tune. Plex has

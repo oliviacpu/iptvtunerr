@@ -376,8 +376,9 @@ func TestHideLiveChannel_SharedUserNeverSeesTheChannel(t *testing.T) {
 		{name: "grid", path: hideProvider + "/grid?type=1,4", size: "3",
 			entries: map[string]int{"Metadata": 3}, xmlEntries: map[string]int{"Video": 3},
 			kept: []string{"C1.49.tunarr.com", "C2.50.tunarr.com", "On Science And Test", "1700000000"}},
-		{name: "hubs", path: hideProvider + "/hubs/discover", size: "1",
-			entries: map[string]int{"Hub": 1}, hubSizes: []string{"1"}, kept: []string{"On Cartoons"}},
+		{name: "hubs", path: hideProvider + "/hubs/discover?includeRecentChannels=1", size: "2",
+			entries: map[string]int{"Hub": 2}, hubSizes: []string{"1", "1"},
+			kept: []string{"On Cartoons", "Recent Channels", "C2.50.tunarr.com", "On Science"}},
 		{name: "search", path: hideProvider + "/library/search?query=on", size: "1",
 			entries: map[string]int{"SearchResult": 1}, kept: []string{"On Science", "0.5"}},
 		{name: "dvrs", path: "/livetv/dvrs", size: "1",
@@ -528,6 +529,81 @@ func TestHideLiveChannel_KeepsAProgramsOtherAirings(t *testing.T) {
 		if !slices.Equal(titles, []string{"On Science", "On Science And Test", "On Cartoons"}) {
 			t.Errorf("%s: programs %q", format, titles)
 		}
+	}
+}
+
+// recentChannels is the size of hubs/discover's Recent Channels hub and the
+// numbers of the channels on it.
+func recentChannels(t *testing.T, body []byte, format string) (string, []string) {
+	t.Helper()
+	type channel struct {
+		JSONIdentifier string `json:"identifier"`
+		XMLIdentifier  string `xml:"identifier,attr"`
+	}
+	type hub struct {
+		JSONHubIdentifier string      `json:"hubIdentifier"`
+		XMLHubIdentifier  string      `xml:"hubIdentifier,attr"`
+		JSONSize          json.Number `json:"size"`
+		XMLSize           string      `xml:"size,attr"`
+		Directory         []channel   `json:"Directory" xml:"Directory"`
+	}
+	var hubs []hub
+	if format == "json" {
+		var doc struct {
+			MediaContainer struct {
+				Hub []hub
+			}
+		}
+		if err := json.Unmarshal(body, &doc); err != nil {
+			t.Fatalf("decode JSON hubs: %v", err)
+		}
+		hubs = doc.MediaContainer.Hub
+	} else {
+		var doc struct {
+			Hub []hub `xml:"Hub"`
+		}
+		if err := xml.Unmarshal(body, &doc); err != nil {
+			t.Fatalf("decode XML hubs: %v", err)
+		}
+		hubs = doc.Hub
+	}
+	for _, h := range hubs {
+		if h.JSONHubIdentifier+h.XMLHubIdentifier != "recent.channels" {
+			continue
+		}
+		var numbers []string
+		for _, c := range h.Directory {
+			numbers = append(numbers, c.JSONIdentifier+c.XMLIdentifier)
+		}
+		return h.JSONSize.String() + h.XMLSize, numbers
+	}
+	t.Fatalf("no Recent Channels hub:\n%s", body)
+	return "", nil
+}
+
+func TestHideLiveChannel_HidesItFromTheRecentChannelsShelf(t *testing.T) {
+	f := newHideFixture(t)
+	p := f.proxy(t, nil)
+	settleOwnerDevice(t, p, "owner-device-token")
+	discover := hideProvider + "/hubs/discover?includeRecentChannels=1"
+	for _, format := range []string{"json", "xml"} {
+		size, numbers := recentChannels(t, hideBody(t, hideServe(p, http.MethodGet, discover, "friend-token", format)), format)
+		if size != "1" || !slices.Equal(numbers, []string{"2"}) {
+			t.Errorf("%s: a shared user's Recent Channels has size %s and channels %q, want 1 and channel 2", format, size, numbers)
+		}
+		for _, token := range []string{"owner-token", "owner-device-token"} {
+			size, numbers := recentChannels(t, hideBody(t, hideServe(p, http.MethodGet, discover, token, format)), format)
+			if size != "2" || !slices.Equal(numbers, []string{"2", "99"}) {
+				t.Errorf("%s: %s's Recent Channels has size %s and channels %q, want 2 and channels 2 and 99", format, token, size, numbers)
+			}
+		}
+	}
+	logs := f.logs.String()
+	if !strings.Contains(logs, "plexlabelproxy_hide: outcome=removed path="+hideProvider+"/hubs/discover viewer=friend removed=") {
+		t.Errorf("no removed line for the shared user's hubs:\n%s", logs)
+	}
+	if strings.Contains(logs, "outcome=leak_suspect") {
+		t.Errorf("the hubs were flagged as leaking the channel:\n%s", logs)
 	}
 }
 

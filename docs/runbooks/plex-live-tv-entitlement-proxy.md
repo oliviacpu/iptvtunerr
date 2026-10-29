@@ -473,8 +473,9 @@ iptv-tunerr plex-label-proxy -elevate-live-tv -hide-live-channel=99 ...
   user. An unsettled token waits up to 2 seconds for a share-list fetch.
 - **What shared users get:** the channel is removed from Live TV responses, in
   JSON and XML, gzipped or not: lineup `Channel` entries, guide and hub airings
-  (`Media`; a program left with none goes too), a program's `Channel` tags,
-  search results, the DVR's `ChannelMapping` and the tuner's `DeviceChannel`.
+  (`Media`; a program left with none goes too), its entry on a hub's Recent
+  Channels shelf, a program's `Channel` tags, search results, the DVR's
+  `ChannelMapping` and the tuner's `DeviceChannel`.
   `size`, `totalSize` and `X-Plex-Container-Total-Size` are lowered to match,
   and a changed response gets `Cache-Control: private, no-store`. Their
   requests on these paths lose `If-None-Match` and `If-Modified-Since`, so a
