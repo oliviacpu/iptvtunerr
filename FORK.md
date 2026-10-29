@@ -60,6 +60,48 @@ Newest first.
 - **Upstream:** not sent / issue or PR link.
 -->
 
+### Shared users get their own provider list plus Live TV (2026-10-29)
+
+- **What it fixes:** with `-elevate-live-tv`, a shared user's `/media/providers` was the owner's: every library on
+  the server, shared with them or not, the owner's playlists, and owner-level container attributes (`myPlexUsername`,
+  the owner's account email; `allowMediaDeletion`, `allowSharing`, `ownerFeatures`, `diagnostics` and so on). Seen
+  live: a shared user with 3 of 6 libraries saw all 6 in the Apple TV sidebar until the app re-synced with plex.tv.
+- **Cause:** `/media/providers` is a Live TV discovery request (`IsLiveTVDiscoveryRequest`), so the proxy fetched it
+  with the owner token and passed the owner's answer on, apart from the `allowTuners` and label rewrites.
+- **Fix:**
+  - `providers.go`: for an elevated `GET /media/providers` (200, JSON or XML) from anyone but the owner, the proxy
+    asks PMS again with the caller's own token (the one the Director keeps under `clientTokenContextKey`; same URL,
+    query and headers less the token and conditionals, gzip, 5 s, redirects not followed) and serves that answer
+    with the elevated answer's Live TV providers (`liveProviderRE` identifiers) put in place of the caller's provider
+    with the same identifier or appended, `size` raised to match. Nothing else of the caller's container changes.
+    JSON keeps `UseNumber` and no HTML escaping; XML keeps its declaration. The result is `Cache-Control: private,
+    no-store`, without the owner body's `ETag`, `Last-Modified` and `X-Plex-Content-*-Length`. It runs before the
+    `allowTuners` and label rewrites, so the caller's `allowTuners="0"` still becomes `1` and a labelled DVR keeps
+    its label. On any failure (an error, the timeout, a status other than 200, another content type, a body that
+    doesn't parse, or no token of their own after session recovery: PMS may answer a tokenless local request as the
+    owner) the elevated answer is served as before, so Live TV keeps working. Logs `plexlabelproxy_providers:
+    outcome=own_list token_fp=<fp> providers=<n> live_tv=<n>` (once per token every 5 minutes) or
+    `outcome=fallback token_fp=<fp> reason=<why>`.
+  - `proxy.go`: the hook in `modifyResponse`; these requests lose `If-None-Match`/`If-Modified-Since`, so a 304
+    can't revive an owner's list the client cached before. `hidechannels.go`: `filterXML`'s tree parse and encode are
+    factored out (`parseXMLTree`, `encodeXMLTree`) for reuse.
+  - No flag: it corrects what elevation leaked, so it's on whenever `-elevate-live-tv` is. With `-elevate-all`
+    shared users browse as the owner anyway and keep the owner's list. Home members and the owner's own devices
+    already list Live TV, so they get exactly their own list. **Docs:** the runbook's paragraph before the flags that
+    narrow elevation.
+- **Test:** `providers_test.go` with anonymised fixtures in `testdata/mediaproviders/` (the owner's list: libraries
+  3, 4, 5, 7, 8 and 9, playlists, Live TV provider 4 and the owner's account; a shared user's: libraries 3, 4 and 5):
+  through the proxy, in JSON and XML, gzipped or not, with the token in a header or the query, the shared user gets
+  two providers, libraries exactly 3, 4 and 5, the Live TV provider with its features, no `myPlexUsername`,
+  `allowMediaDeletion` off, `size` 2 and `allowTuners` on, and the second PMS request carried their token, query and
+  `Accept`; a label map relabels the added provider; the owner's answer is byte-identical after one PMS request;
+  `-elevate-all` keeps the owner's list; a 500, another content type, a body that doesn't parse or a timeout serves
+  the elevated answer and logs the fallback; a conditional request gets the whole answer; a tokenless request elevated
+  by session recovery never asks PMS without a token; `own_list` is logged once per token. `graftLiveProviders` on
+  both formats: a provider with the same identifier is replaced in place, another appended, `size` adjusted, the
+  caller's container otherwise untouched. `proxy_test.go`: three elevation tests that count PMS requests now expect
+  the shared user's own request.
+
 ### A hidden channel stays off the Recent Channels shelf and out of Media-less airings (2026-10-29)
 
 - **What it fixes:** with `-hide-live-channel=99`, a shared user's Live TV home still listed channel 99:

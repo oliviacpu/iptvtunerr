@@ -259,6 +259,8 @@ The implementation lives in:
 - `internal/plexlabelproxy/entitlement.go` - Live TV request classifier, token
   elevation, and `allowTuners` XML hint rewrite
 - `internal/plexlabelproxy/proxy.go` - reverse proxy and response rewrite hooks
+- `internal/plexlabelproxy/providers.go` - a shared user's own
+  `/media/providers` plus the Live TV providers
 - `cmd/iptv-tunerr/cmd_plex_label_proxy.go` - CLI wiring and env fallback
 
 ## Manual Implementation Without Tunerr
@@ -370,6 +372,32 @@ that path is replaced (any other file is refused), and it's removed on
 shutdown. Keep it in a directory only the operator and the front end can
 enter. Socket peers are treated like loopback peers: their `X-Forwarded-For`
 and `CF-Connecting-IP` headers are trusted.
+
+Shared users get Plex's answers for their own token everywhere but Live TV.
+That includes `/media/providers`, the list of libraries and sources a client
+builds its sidebar from: it's elevated so the app finds the Live TV provider,
+but the owner's answer lists every library on the server (shared with them or
+not), the owner's playlists and the owner's account (`myPlexUsername`, deletion
+and sharing rights). So for anyone but the owner, the proxy asks PMS for
+`/media/providers` again with the caller's own token (same query and `Accept`,
+5 s timeout) and serves that answer, with the elevated answer's Live TV
+providers (`tv.plex.providers.epg.xmltv:<dvr>`) added or put in place of the
+caller's own and `size` raised to match. The caller sees their own libraries
+and account plus Live TV; `allowTuners` and the provider labels are rewritten
+on it as before. The owner's own requests aren't touched, and with
+`-elevate-all` everyone keeps the owner's list. If the second request fails (an
+error, the timeout, a status other than 200, another content type or a body
+that doesn't parse), or the request carried no token of its own, the elevated
+answer is served unchanged, so Live TV keeps working:
+
+```text
+plexlabelproxy_providers: outcome=own_list token_fp=sha256:... providers=2 live_tv=1
+plexlabelproxy_providers: outcome=fallback token_fp=sha256:... reason=status_500
+```
+
+`own_list` is logged at most every 5 minutes per token. `reason=` is
+`fetch_failed`, `timeout`, `status_<code>`, `content_type_mismatch`,
+`unparsed`, `unsupported_type`, `too_large` or `no_caller_token`.
 
 These flags narrow elevation further:
 

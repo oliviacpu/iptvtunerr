@@ -216,6 +216,9 @@ type Proxy struct {
 	viewers *liveViewerTracker
 	// hidden is set with Config.HideLiveChannels.
 	hidden *hiddenChannels
+	// ownProviders is set with Config.ElevateLiveTV: a shared user's
+	// /media/providers is their own list plus Live TV (providers.go).
+	ownProviders *ownProviders
 	// afterViewerLog, when set (tests), runs after each new-viewer log line.
 	afterViewerLog func()
 }
@@ -345,6 +348,9 @@ func New(cfg Config) (*Proxy, error) {
 		}
 		p.viewers = newLiveViewerTracker(plexShareFetcher(u, plexTV, strings.TrimSpace(cfg.OwnerToken), cfg.Transport))
 	}
+	if cfg.ElevateLiveTV {
+		p.ownProviders = newOwnProviders(cfg.Transport)
+	}
 	p.loadAbuseState()
 
 	rp := httputil.NewSingleHostReverseProxy(u)
@@ -425,6 +431,13 @@ func New(cfg Config) (*Proxy, error) {
 		if owner := strings.TrimSpace(p.cfg.OwnerToken); owner != "" &&
 			inboundPlexToken(req) == owner && strings.TrimSpace(originalToken) != owner {
 			*req = *req.WithContext(context.WithValue(req.Context(), clientTokenContextKey{}, strings.TrimSpace(originalToken)))
+		}
+		// A shared user's /media/providers becomes their own list: PMS must
+		// answer in full, so a 304 can't revive an owner's list the client
+		// cached before.
+		if _, ok := p.ownProvidersCaller(req); ok {
+			req.Header.Del("If-None-Match")
+			req.Header.Del("If-Modified-Since")
 		}
 		// -hide-live-channel: who's asking (their own token) and whether the
 		// owner asked for the friend view; ViewAsHeader never reaches PMS.
@@ -608,6 +621,9 @@ func (p *Proxy) modifyResponse(resp *http.Response) error {
 	}
 	p.recordAcceptedLiveViewer(resp)
 	if err := p.hideLiveChannelEntries(resp); err != nil {
+		return err
+	}
+	if err := p.serveOwnProviders(resp); err != nil {
 		return err
 	}
 	if resp.StatusCode != http.StatusOK {

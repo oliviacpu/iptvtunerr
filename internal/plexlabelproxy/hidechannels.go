@@ -529,6 +529,29 @@ func (n *xmlNode) elementCount(name string) int {
 // XML declaration is kept as it was, like rewriteTokens; the body is
 // re-encoded only when something was removed.
 func (r *hideRun) filterXML(body []byte) ([]byte, bool, error) {
+	declHead, doc, err := parseXMLTree(body)
+	if err != nil {
+		return nil, false, err
+	}
+	for _, ch := range doc.children {
+		if root, ok := ch.(*xmlNode); ok {
+			r.rootRemoved += r.filterChildrenXML(root)
+		}
+	}
+	if r.countOnly || r.removed == 0 {
+		return body, false, nil
+	}
+	out, err := encodeXMLTree(declHead, doc)
+	if err != nil {
+		return nil, false, err
+	}
+	return out, true, nil
+}
+
+// parseXMLTree parses body into an element tree under a nameless document
+// node, returning the XML declaration as written (empty when there is none)
+// apart from the tree, since encoding/xml won't re-emit it in place.
+func parseXMLTree(body []byte) ([]byte, *xmlNode, error) {
 	declHead := []byte{}
 	rest := body
 	trimmed := bytes.TrimLeft(body, " \t\r\n")
@@ -548,7 +571,7 @@ func (r *hideRun) filterXML(body []byte) ([]byte, bool, error) {
 			break
 		}
 		if err != nil {
-			return nil, false, err
+			return nil, nil, err
 		}
 		top := stack[len(stack)-1]
 		switch t := tok.(type) {
@@ -566,24 +589,21 @@ func (r *hideRun) filterXML(body []byte) ([]byte, bool, error) {
 			top.children = append(top.children, xml.CopyToken(tok))
 		}
 	}
-	for _, ch := range doc.children {
-		if root, ok := ch.(*xmlNode); ok {
-			r.rootRemoved += r.filterChildrenXML(root)
-		}
-	}
-	if r.countOnly || r.removed == 0 {
-		return body, false, nil
-	}
+	return declHead, doc, nil
+}
+
+// encodeXMLTree is parseXMLTree's inverse: declHead, then doc's children.
+func encodeXMLTree(declHead []byte, doc *xmlNode) ([]byte, error) {
 	var buf bytes.Buffer
 	buf.Write(declHead)
 	enc := xml.NewEncoder(&buf)
 	if err := encodeXMLNodes(enc, doc.children); err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	if err := enc.Flush(); err != nil {
-		return nil, false, err
+		return nil, err
 	}
-	return buf.Bytes(), true, nil
+	return buf.Bytes(), nil
 }
 
 func encodeXMLNodes(enc *xml.Encoder, children []any) error {

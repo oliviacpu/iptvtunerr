@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MediaContainer size="1" allowCameraUpload="0" allowChannelAccess="1" allowMediaDeletion="0" allowSharing="0" allowSync="1" allowTuners="0" backgroundProcessing="1" certificate="1" companionProxy="1" countryCode="usa" eventStream="1" friendlyName="Example Server" livetv="7" machineIdentifier="machine-1" musicAnalysis="2" myPlex="1" myPlexMappingState="mapped" myPlexSigninState="ok" myPlexSubscription="1" offlineTranscode="1" platform="Linux" platformVersion="6.1" requestParametersInCookie="1" sync="1" transcoderActiveVideoSessions="0" transcoderAudio="1" transcoderLyrics="1" transcoderSubtitles="1" transcoderVideo="1" updatedAt="1760000000" version="1.42.2.10156">
+<MediaProvider identifier="com.plexapp.plugins.library" title="Library" types="video,audio,photo" protocols="stream,download">
+<Feature key="/library/sections" type="content">
+<Directory hubKey="/hubs" title="Home" />
+<Directory agent="tv.plex.agents.movie" language="en-US" refreshing="0" scanner="Plex Movie" uuid="00000000-0000-4000-8000-000000000003" id="3" key="/library/sections/3" hubKey="/hubs/sections/3" title="Movies" type="movie" updatedAt="1760000003">
+<Pivot id="recommended" key="/hubs/sections/3" type="hub" title="Recommended" context="content.discover" symbol="star" />
+<Pivot id="library" key="/library/sections/3/all?type=1" type="list" title="Library" context="content.library" symbol="library" />
+</Directory>
+<Directory agent="tv.plex.agents.series" language="en-US" refreshing="0" scanner="Plex TV Series" uuid="00000000-0000-4000-8000-000000000004" id="4" key="/library/sections/4" hubKey="/hubs/sections/4" title="TV Shows" type="show" updatedAt="1760000004">
+<Pivot id="recommended" key="/hubs/sections/4" type="hub" title="Recommended" context="content.discover" symbol="star" />
+<Pivot id="library" key="/library/sections/4/all?type=2" type="list" title="Library" context="content.library" symbol="library" />
+</Directory>
+<Directory agent="tv.plex.agents.music" language="en-US" refreshing="0" scanner="Plex Music" uuid="00000000-0000-4000-8000-000000000005" id="5" key="/library/sections/5" hubKey="/hubs/sections/5" title="Music" type="artist" updatedAt="1760000005">
+<Pivot id="recommended" key="/hubs/sections/5" type="hub" title="Recommended" context="content.discover" symbol="star" />
+<Pivot id="library" key="/library/sections/5/all?type=8" type="list" title="Library" context="content.library" symbol="library" />
+</Directory>
+</Feature>
+<Feature key="/hubs/search" type="search" />
+<Feature key="/library/matches" type="match" />
+<Feature key="/library/metadata" type="metadata" />
+<Feature key="/:/rate" type="rate" />
+<Feature key="/photo/:/transcode" type="imagetranscoder" />
+<Feature key="/hubs/promoted" type="promoted" />
+<Feature key="/hubs/continueWatching" type="continuewatching" />
+<Feature flavor="universal" key="/playlists" type="playlist" />
+<Feature flavor="universal" key="/playQueues" type="playqueue" />
+<Feature key="/library/collections" type="collection" />
+<Feature scrobbleKey="/:/scrobble" unscrobbleKey="/:/unscrobble" key="/:/timeline" type="timeline" />
+<Feature type="queryParser" />
+</MediaProvider>
+</MediaContainer>
