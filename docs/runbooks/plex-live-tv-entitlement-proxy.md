@@ -501,12 +501,16 @@ iptv-tunerr plex-label-proxy -elevate-live-tv -hide-live-channel=99 ...
   user. An unsettled token waits up to 2 seconds for a share-list fetch.
 - **What shared users get:** the channel is removed from Live TV responses, in
   JSON and XML, gzipped or not: lineup `Channel` entries, guide and hub airings
-  (`Media`; a program left with none goes too), a program's `Channel` tags,
-  search results, the DVR's `ChannelMapping` and the tuner's `DeviceChannel`.
+  (`Media`; a program left with none goes too), its entry on a hub's Recent
+  Channels shelf, a program's `Channel` tags, search results, the DVR's
+  `ChannelMapping` and the tuner's `DeviceChannel`.
   `size`, `totalSize` and `X-Plex-Container-Total-Size` are lowered to match,
   and a changed response gets `Cache-Control: private, no-store`. Their
   requests on these paths lose `If-None-Match` and `If-Modified-Since`, so a
-  304 can't bring back a response cached before hiding. A tune or any other
+  304 can't bring back a response cached before hiding, and `Media` from
+  `excludeElements` (dropping the parameter when nothing else is listed):
+  `Media` is what places an airing on a channel, so Plex is asked for it and
+  the client gets an element it asked to omit. A tune or any other
   `/livetv/dvrs/<dvr>/channels/<channel>/...` request for it gets 404 and never
   reaches Plex, including one nested in a stream start (a transcode's `path`,
   a play queue's `uri` or `path`, in the query or the body). That's audited as

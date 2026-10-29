@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -66,6 +67,7 @@ type hideFixture struct {
 type pmsCall struct {
 	path, viewAs string
 	conditional  bool
+	query        url.Values
 }
 
 func newHideFixture(t *testing.T) *hideFixture {
@@ -108,6 +110,7 @@ func (f *hideFixture) servePMS(w http.ResponseWriter, r *http.Request) {
 		path:        r.URL.Path,
 		viewAs:      r.Header.Get(ViewAsHeader),
 		conditional: r.Header.Get("If-None-Match") != "" || r.Header.Get("If-Modified-Since") != "",
+		query:       r.URL.Query(),
 	})
 	dvrsXML := f.dvrsXML
 	f.mu.Unlock()
@@ -153,6 +156,12 @@ func (f *hideFixture) servePMS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		body = b
+		if excludesMedia(r) {
+			if body, err = withoutMediaElements(body, asJSON); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
 		if name == "sections_all" {
 			w.Header().Set("X-Plex-Container-Start", "0")
 			w.Header().Set("X-Plex-Container-Total-Size", "10")
@@ -176,6 +185,49 @@ func (f *hideFixture) servePMS(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Plex-Content-Compressed-Length", strconv.Itoa(len(body)))
 	}
 	_, _ = w.Write(body)
+}
+
+// excludesMedia reports whether r asks PMS to leave out Media elements
+// (excludeElements=Media,...), as Plex clients may.
+func excludesMedia(r *http.Request) bool {
+	for _, v := range r.URL.Query()["excludeElements"] {
+		if slices.Contains(strings.Split(v, ","), "Media") {
+			return true
+		}
+	}
+	return false
+}
+
+var xmlMediaRE = regexp.MustCompile(`(?s)\s*<Media\b[^>]*?(?:/>|>.*?</Media>)`)
+
+// withoutMediaElements is a fixture body without its Media elements, as PMS
+// answers a request with excludeElements=Media.
+func withoutMediaElements(body []byte, asJSON bool) ([]byte, error) {
+	if !asJSON {
+		return xmlMediaRE.ReplaceAll(body, nil), nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	var doc any
+	if err := dec.Decode(&doc); err != nil {
+		return nil, err
+	}
+	var strip func(any)
+	strip = func(node any) {
+		switch n := node.(type) {
+		case map[string]any:
+			delete(n, "Media")
+			for _, v := range n {
+				strip(v)
+			}
+		case []any:
+			for _, v := range n {
+				strip(v)
+			}
+		}
+	}
+	strip(doc)
+	return json.Marshal(doc)
 }
 
 // proxy is a proxy hiding channel 99 in front of the fixture; edit changes
@@ -239,6 +291,20 @@ func (f *hideFixture) callsTo(path string) int {
 		}
 	}
 	return n
+}
+
+// lastCallTo is the last request PMS got for path.
+func (f *hideFixture) lastCallTo(t *testing.T, path string) pmsCall {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := len(f.calls) - 1; i >= 0; i-- {
+		if f.calls[i].path == path {
+			return f.calls[i]
+		}
+	}
+	t.Fatalf("PMS got no request for %s", path)
+	return pmsCall{}
 }
 
 func (f *hideFixture) viewAsForwarded() bool {
@@ -376,8 +442,9 @@ func TestHideLiveChannel_SharedUserNeverSeesTheChannel(t *testing.T) {
 		{name: "grid", path: hideProvider + "/grid?type=1,4", size: "3",
 			entries: map[string]int{"Metadata": 3}, xmlEntries: map[string]int{"Video": 3},
 			kept: []string{"C1.49.tunarr.com", "C2.50.tunarr.com", "On Science And Test", "1700000000"}},
-		{name: "hubs", path: hideProvider + "/hubs/discover", size: "1",
-			entries: map[string]int{"Hub": 1}, hubSizes: []string{"1"}, kept: []string{"On Cartoons"}},
+		{name: "hubs", path: hideProvider + "/hubs/discover?includeRecentChannels=1", size: "2",
+			entries: map[string]int{"Hub": 2}, hubSizes: []string{"1", "1"},
+			kept: []string{"On Cartoons", "Recent Channels", "C2.50.tunarr.com", "On Science"}},
 		{name: "search", path: hideProvider + "/library/search?query=on", size: "1",
 			entries: map[string]int{"SearchResult": 1}, kept: []string{"On Science", "0.5"}},
 		{name: "dvrs", path: "/livetv/dvrs", size: "1",
@@ -527,6 +594,165 @@ func TestHideLiveChannel_KeepsAProgramsOtherAirings(t *testing.T) {
 		}
 		if !slices.Equal(titles, []string{"On Science", "On Science And Test", "On Cartoons"}) {
 			t.Errorf("%s: programs %q", format, titles)
+		}
+	}
+}
+
+// recentChannels is the size of hubs/discover's Recent Channels hub and the
+// numbers of the channels on it.
+func recentChannels(t *testing.T, body []byte, format string) (string, []string) {
+	t.Helper()
+	type channel struct {
+		JSONIdentifier string `json:"identifier"`
+		XMLIdentifier  string `xml:"identifier,attr"`
+	}
+	type hub struct {
+		JSONHubIdentifier string      `json:"hubIdentifier"`
+		XMLHubIdentifier  string      `xml:"hubIdentifier,attr"`
+		JSONSize          json.Number `json:"size"`
+		XMLSize           string      `xml:"size,attr"`
+		Directory         []channel   `json:"Directory" xml:"Directory"`
+	}
+	var hubs []hub
+	if format == "json" {
+		var doc struct {
+			MediaContainer struct {
+				Hub []hub
+			}
+		}
+		if err := json.Unmarshal(body, &doc); err != nil {
+			t.Fatalf("decode JSON hubs: %v", err)
+		}
+		hubs = doc.MediaContainer.Hub
+	} else {
+		var doc struct {
+			Hub []hub `xml:"Hub"`
+		}
+		if err := xml.Unmarshal(body, &doc); err != nil {
+			t.Fatalf("decode XML hubs: %v", err)
+		}
+		hubs = doc.Hub
+	}
+	for _, h := range hubs {
+		if h.JSONHubIdentifier+h.XMLHubIdentifier != "recent.channels" {
+			continue
+		}
+		var numbers []string
+		for _, c := range h.Directory {
+			numbers = append(numbers, c.JSONIdentifier+c.XMLIdentifier)
+		}
+		return h.JSONSize.String() + h.XMLSize, numbers
+	}
+	t.Fatalf("no Recent Channels hub:\n%s", body)
+	return "", nil
+}
+
+func TestHideLiveChannel_HidesItFromTheRecentChannelsShelf(t *testing.T) {
+	f := newHideFixture(t)
+	p := f.proxy(t, nil)
+	settleOwnerDevice(t, p, "owner-device-token")
+	discover := hideProvider + "/hubs/discover?includeRecentChannels=1"
+	for _, format := range []string{"json", "xml"} {
+		size, numbers := recentChannels(t, hideBody(t, hideServe(p, http.MethodGet, discover, "friend-token", format)), format)
+		if size != "1" || !slices.Equal(numbers, []string{"2"}) {
+			t.Errorf("%s: a shared user's Recent Channels has size %s and channels %q, want 1 and channel 2", format, size, numbers)
+		}
+		for _, token := range []string{"owner-token", "owner-device-token"} {
+			size, numbers := recentChannels(t, hideBody(t, hideServe(p, http.MethodGet, discover, token, format)), format)
+			if size != "2" || !slices.Equal(numbers, []string{"2", "99"}) {
+				t.Errorf("%s: %s's Recent Channels has size %s and channels %q, want 2 and channels 2 and 99", format, token, size, numbers)
+			}
+		}
+	}
+	logs := f.logs.String()
+	if !strings.Contains(logs, "plexlabelproxy_hide: outcome=removed path="+hideProvider+"/hubs/discover viewer=friend removed=") {
+		t.Errorf("no removed line for the shared user's hubs:\n%s", logs)
+	}
+	if strings.Contains(logs, "outcome=leak_suspect") {
+		t.Errorf("the hubs were flagged as leaking the channel:\n%s", logs)
+	}
+}
+
+func TestHideLiveChannel_AsksPMSForTheMediaASharedUserLeavesOut(t *testing.T) {
+	f := newHideFixture(t)
+	p := f.proxy(t, nil)
+	settleOwnerDevice(t, p, "owner-device-token")
+	discover := hideProvider + "/hubs/discover"
+	cases := []struct {
+		name, token, exclude string
+		header               []string
+		// want is the excludeElements PMS gets, "" for none.
+		want string
+	}{
+		{name: "shared user", token: "friend-token", exclude: "Media,Director", want: "Director"},
+		{name: "shared user, Media only", token: "friend-token", exclude: "Media", want: ""},
+		{name: "shared user, no Media", token: "friend-token", exclude: "Director", want: "Director"},
+		{name: "no token", token: "", exclude: "Director,Media,Writer", want: "Director,Writer"},
+		{name: "owner's preview", token: "owner-token", exclude: "Media,Director", header: []string{ViewAsHeader, "friend"}, want: "Director"},
+		{name: "owner's device", token: "owner-device-token", exclude: "Media,Director", want: "Media,Director"},
+		{name: "owner", token: "owner-token", exclude: "Media,Director", want: "Media,Director"},
+	}
+	for _, c := range cases {
+		path := discover + "?includeRecentChannels=1&excludeElements=" + c.exclude + "&count=12"
+		if rec := hideServe(p, http.MethodGet, path, c.token, "json", c.header...); rec.Code != http.StatusOK {
+			t.Fatalf("%s: status %d", c.name, rec.Code)
+		}
+		q := f.lastCallTo(t, discover).query
+		got, sent := q["excludeElements"]
+		if (c.want == "" && sent) || (c.want != "" && !slices.Equal(got, []string{c.want})) {
+			t.Errorf("%s: PMS got excludeElements %q, want %q", c.name, got, c.want)
+		}
+		if q.Get("includeRecentChannels") != "1" || q.Get("count") != "12" {
+			t.Errorf("%s: PMS got includeRecentChannels=%q count=%q, want them kept", c.name, q.Get("includeRecentChannels"), q.Get("count"))
+		}
+	}
+}
+
+func TestHideLiveChannel_HidesAiringsWhoseMediaWasExcluded(t *testing.T) {
+	f := newHideFixture(t)
+	p := f.proxy(t, nil)
+	settleOwnerDevice(t, p, "owner-device-token")
+	discover := hideProvider + "/hubs/discover?includeRecentChannels=1&excludeElements=Media"
+	for _, format := range []string{"json", "xml"} {
+		body := hideBody(t, hideServe(p, http.MethodGet, discover, "friend-token", format))
+		for _, gone := range []string{hiddenIdent, "Only On Test", "99 99 Test", "ch99.png"} {
+			if bytes.Contains(body, []byte(gone)) {
+				t.Errorf("%s: %q is still in:\n%s", format, gone, body)
+			}
+		}
+		// The other airings stay, with the Media the client asked to omit.
+		for _, kept := range []string{"On Cartoons", "C1.49.tunarr.com", "channelIdentifier"} {
+			if !bytes.Contains(body, []byte(kept)) {
+				t.Errorf("%s: %q was removed:\n%s", format, kept, body)
+			}
+		}
+		// The owner's device gets what it asked for: no Media.
+		body = hideBody(t, hideServe(p, http.MethodGet, discover, "owner-device-token", format))
+		if bytes.Contains(body, []byte("channelIdentifier")) || !bytes.Contains(body, []byte("Only On Test")) {
+			t.Errorf("%s: the owner's device got:\n%s", format, body)
+		}
+	}
+	if logs := f.logs.String(); strings.Contains(logs, "outcome=leak_suspect") {
+		t.Errorf("the hubs were flagged as leaking the channel:\n%s", logs)
+	}
+}
+
+func TestWithoutExcludedMedia(t *testing.T) {
+	for _, c := range []struct {
+		in, want string
+		changed  bool
+	}{
+		{"excludeElements=Media,Director", "excludeElements=Director", true},
+		{"a=1&excludeElements=Media&b=2", "a=1&b=2", true},
+		{"b=2&excludeElements=Director%2CMedia%2CWriter&a=1", "b=2&excludeElements=Director,Writer&a=1", true},
+		{"X-Plex-Token=t%2Bx&excludeElements=media,&excludeElements=Media", "X-Plex-Token=t%2Bx", true},
+		{"excludeElements=Media%zz&a=1", "a=1", true},
+		{"excludeElements=Director&excludeFields=Media", "excludeElements=Director&excludeFields=Media", false},
+		{"", "", false},
+	} {
+		got, changed := withoutExcludedMedia(c.in)
+		if got != c.want || changed != c.changed {
+			t.Errorf("withoutExcludedMedia(%q) = %q, %v; want %q, %v", c.in, got, changed, c.want, c.changed)
 		}
 	}
 }
